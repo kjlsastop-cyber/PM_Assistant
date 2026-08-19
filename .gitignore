@@ -1,0 +1,6 @@
+.env
+kb_store.json
+__pycache__/
+*.pyc
+.streamlit/
+venv/
