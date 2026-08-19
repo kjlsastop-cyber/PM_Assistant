@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""产品经理助手 Agent（本地 Web 界面版，含文件上传与知识库 RAG）
+"""助手工作台（本地 Web 界面版，支持多助手切换 / 大模型选择 / 文件上传 / 各助手独立知识库 RAG）
 
 启动：python -m streamlit run app.py --server.headless true --browser.gatherUsageStats false
 """
@@ -13,33 +13,45 @@ from openai import OpenAI
 import kb
 
 BASE_DIR = Path(__file__).parent
-PROMPT_FILE = BASE_DIR / "system_prompt.md"
+PROMPTS_DIR = BASE_DIR / "prompts"
 
-st.set_page_config(page_title="产品经理助手", page_icon="📋", layout="wide")
+st.set_page_config(page_title="助手工作台", page_icon="📋", layout="wide")
 
 # ---------- 初始化 ----------
 load_dotenv(BASE_DIR / ".env")
-
-if not PROMPT_FILE.exists():
-    st.error("缺少 system_prompt.md 文件")
-    st.stop()
-
-SYSTEM_PROMPT = PROMPT_FILE.read_text(encoding="utf-8").strip()
-MODEL = os.getenv("MODEL_NAME", "gpt-4o-mini").strip()
 
 UPLOAD_TYPES = ["txt", "md", "pdf", "docx"]
 MAX_UPLOAD_CHARS = 8000  # 本次附件注入上下文的最大字符数
 
 
+def _model_options():
+    """可选大模型：DeepSeek 使用 OPENAI_* 配置；通义千问复用 EMBEDDING_* 密钥与地址。"""
+    options = {}
+    ds_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if ds_key:
+        ds_model = os.getenv("MODEL_NAME", "gpt-4o-mini").strip()
+        options[f"DeepSeek（{ds_model}）"] = (
+            ds_key,
+            os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip(),
+            ds_model,
+        )
+    qw_key = os.getenv("EMBEDDING_API_KEY", "").strip()
+    if qw_key:
+        qw_model = os.getenv("QWEN_MODEL", "qwen3.8-max").strip()
+        options[f"通义千问（{qw_model}）"] = (
+            qw_key,
+            os.getenv(
+                "EMBEDDING_BASE_URL",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            ).strip(),
+            qw_model,
+        )
+    return options
+
+
 @st.cache_resource
-def get_client():
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        return None
-    return OpenAI(
-        api_key=api_key,
-        base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip(),
-    )
+def get_client(api_key: str, base_url: str):
+    return OpenAI(api_key=api_key, base_url=base_url)
 
 
 def extract_text(uploaded_file) -> str:
@@ -59,24 +71,44 @@ def extract_text(uploaded_file) -> str:
     raise ValueError(f"不支持的文件类型：{ext}")
 
 
-client = get_client()
-knowledge_base = kb.KnowledgeBase()
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []  # 每项: {"role", "display", "content"}
+if "histories" not in st.session_state:
+    st.session_state.histories = {}
 
 # ---------- 侧边栏 ----------
 with st.sidebar:
-    st.title("📋 产品经理助手")
-    st.caption(f"当前模型：{MODEL}")
+    assistants = {}
+    if PROMPTS_DIR.exists():
+        assistants = {p.stem: p for p in sorted(PROMPTS_DIR.glob("*.md"))}
+    if not assistants:
+        st.error("prompts/ 目录下没有助手提示词文件（.md），请先添加。")
+        st.stop()
+    names = list(assistants.keys())
+    if st.session_state.get("assistant_sel") not in names:
+        st.session_state.pop("assistant_sel", None)
+    chosen = st.selectbox("当前助手", names, key="assistant_sel")
+    SYSTEM_PROMPT = assistants[chosen].read_text(encoding="utf-8").strip()
+    messages = st.session_state.histories.setdefault(chosen, [])
+    knowledge_base = kb.KnowledgeBase(chosen)  # 各助手知识库独立存储
 
-    if client is None:
-        st.error("未配置 OPENAI_API_KEY，请编辑 .env 文件后刷新页面。")
+    st.title(f"📋 {chosen}")
 
-    st.subheader("知识库（RAG）")
+    options = _model_options()
+    labels = list(options.keys())
+    if st.session_state.get("model_sel") not in labels:
+        st.session_state.pop("model_sel", None)
+    if labels:
+        label = st.selectbox("当前大模型", labels, key="model_sel")
+        api_key, base_url, model_name = options[label]
+        client = get_client(api_key, base_url)
+        st.caption(f"当前模型：{model_name}")
+    else:
+        client = None
+        st.error("未配置任何大模型密钥，请编辑 .env 文件后刷新页面。")
+
+    st.subheader("知识库（智能检索）")
     embedding_ready = kb.get_embedding_client() is not None
     if not embedding_ready:
-        st.warning("未配置 Embedding 服务（EMBEDDING_*），知识库暂不可用。")
+        st.warning("未配置向量化服务（.env 中的 EMBEDDING_* 配置项），知识库暂不可用。")
 
     kb_files = st.file_uploader(
         "拖入或点击上传文档入库（txt/md/pdf/docx，可多选）",
@@ -120,12 +152,12 @@ with st.sidebar:
         accept_multiple_files=True,
     )
 
-    if st.button("🗑️ 清空对话", use_container_width=True):
-        st.session_state.messages = []
+    if st.button("🗑️ 清空当前对话", use_container_width=True):
+        messages.clear()
         st.rerun()
 
 # ---------- 历史消息 ----------
-for msg in st.session_state.messages:
+for msg in messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["display"])
 
@@ -133,7 +165,7 @@ for msg in st.session_state.messages:
 user_input = st.chat_input("输入你的问题，可配合左侧附件与知识库使用")
 if user_input:
     if client is None:
-        st.error("请先在 .env 中配置 OPENAI_API_KEY。")
+        st.error("请先在 .env 中配置大模型密钥（OPENAI_API_KEY 或 EMBEDDING_API_KEY）。")
         st.stop()
 
     # 1) 本次附件文本（多文件拼接）
@@ -173,7 +205,7 @@ if user_input:
     ]
     api_content = "\n\n".join(parts)
 
-    st.session_state.messages.append(
+    messages.append(
         {"role": "user", "display": user_input, "content": api_content}
     )
     with st.chat_message("user"):
@@ -182,25 +214,27 @@ if user_input:
     with st.chat_message("assistant"):
         try:
             stream = client.chat.completions.create(
-                model=MODEL,
+                model=model_name,
                 messages=[{"role": "system", "content": SYSTEM_PROMPT}]
                 + [
                     {"role": m["role"], "content": m["content"]}
-                    for m in st.session_state.messages
+                    for m in messages
                 ],
                 stream=True,
             )
 
             def _content_stream():
                 for chunk in stream:
+                    if not chunk.choices:  # 跳过空 choices 的统计块，避免越界
+                        continue
                     content = chunk.choices[0].delta.content
                     if content:  # 跳过空内容块，避免界面显示 None
                         yield content
 
             reply = st.write_stream(_content_stream())
-            st.session_state.messages.append(
+            messages.append(
                 {"role": "assistant", "display": reply, "content": reply}
             )
         except Exception as e:  # 网络/鉴权/模型错误，保留会话可重试
-            st.session_state.messages.pop()
+            messages.pop()
             st.error(f"调用失败：{e}")
