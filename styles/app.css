@@ -56,14 +56,7 @@ div[data-testid="stChatInputFileUploadButton"] button::before {
     line-height: 1;
 }
 
-/* 按钮：企鹅黑胶囊 */
-div.stButton > button {
-    border-radius: 999px !important;
-    background: #33383f !important;
-    color: #fff !important;
-    border: none !important;
-    font-weight: 700;
-}
+/* 按钮样式已按 kind 区分，见下方话题列表按钮样式 */
 
 /* 上传区：发卡蓝虚线圆角 */
 div[data-testid="stFileUploadDropzone"] {
@@ -145,6 +138,80 @@ div[data-testid="stSelectbox"] > div {
     border-radius: 8px !important;
     border: 2px solid #f3e7d3 !important;
     background: #fff !important;
+}
+
+/* ========== 话题列表按钮样式 ========== */
+
+/* --- primary（激活话题）：深色胶囊 --- */
+.stButton > button[kind="primary"] {
+    background: #33383f !important;
+    color: #fff !important;
+    border: 1.5px solid #33383f !important;
+    border-radius: 12px !important;
+    font-weight: 600 !important;
+    font-size: 13px !important;
+    box-shadow: 0 2px 8px rgba(51, 56, 63, .25) !important;
+    padding: 6px 10px !important;
+}
+
+/* --- secondary 基础：奶油色圆角（用于未激活话题/图标按钮/新建话题） --- */
+.stButton > button[kind="secondary"] {
+    background: rgba(255, 252, 246, .9) !important;
+    color: #33383f !important;
+    border: 1.5px solid #f3e7d3 !important;
+    border-radius: 12px !important;
+    font-weight: 500 !important;
+    font-size: 13px !important;
+    box-shadow: 0 1px 3px rgba(120, 100, 60, .08) !important;
+    padding: 6px 10px !important;
+    text-align: left !important;
+    justify-content: flex-start !important;
+    transition: all .15s ease;
+}
+.stButton > button[kind="secondary"]:hover {
+    background: rgba(242, 185, 92, .2) !important;
+    border-color: #f2b95c !important;
+}
+
+/* --- tertiary 基础（新建话题 / ✓✕）：透明无框文字链接 --- */
+.stButton > button[kind="tertiary"] {
+    background: transparent !important;
+    color: #6b5a40 !important;
+    border: none !important;
+    box-shadow: none !important;
+    font-weight: 600 !important;
+    border-radius: 0 !important;
+    padding: 4px 2px !important;
+    font-size: 14px !important;
+}
+.stButton > button[kind="tertiary"]:hover {
+    background: transparent !important;
+    color: #f2b95c !important;
+}
+
+/* --- 图标按钮（tertiary 位于 stColumn 内）：小圆形浅色 --- */
+div[data-testid="stColumn"] .stButton > button[kind="tertiary"] {
+    width: 28px !important;
+    height: 28px !important;
+    min-width: 28px !important;
+    padding: 0 !important;
+    border-radius: 50% !important;
+    background: rgba(255, 252, 246, .95) !important;
+    color: #8a7a5f !important;
+    border: 1px solid #e8dcc8 !important;
+    font-size: 11px !important;
+    font-weight: 400 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    box-shadow: 0 1px 3px rgba(120, 100, 60, .1) !important;
+    transition: all .15s ease;
+}
+div[data-testid="stColumn"] .stButton > button[kind="tertiary"]:hover {
+    background: rgba(242, 185, 92, .3) !important;
+    color: #33383f !important;
+    border-color: #f2b95c !important;
+    transform: scale(1.08);
 }
 
 /* 表格样式 */
