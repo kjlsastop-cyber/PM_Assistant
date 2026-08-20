@@ -6,3 +6,4 @@ history_topics.json
 .streamlit/*
 !.streamlit/config.toml
 venv/
+design_mockup.html

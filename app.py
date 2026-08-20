@@ -273,7 +273,10 @@ inject_cute_theme()
 with st.sidebar:
     assistants = {}
     if PROMPTS_DIR.exists():
-        assistants = {p.stem: p for p in sorted(PROMPTS_DIR.glob("*.md"))}
+        assistants = {
+            p.stem: p for p in sorted(PROMPTS_DIR.glob("*.md"))
+            if p.stem != "reviewer"
+        }
     if not assistants:
         st.error("prompts/ 目录下没有助手提示词文件（.md），请先添加。")
         st.stop()
@@ -301,7 +304,7 @@ with st.sidebar:
     messages = cur["messages"]
 
     st.subheader("历史对话")
-    if st.button("＋ 新建话题", use_container_width=True, key="new_topic"):
+    if st.button("+ 新建话题", key="new_topic", type="tertiary", use_container_width=True):
         cur = _new_topic()
         topics.insert(0, cur)
         st.session_state.cur_topic[chosen] = cur["id"]
@@ -309,44 +312,57 @@ with st.sidebar:
         st.rerun()
 
     for t in topics:
-        c1, c2, c3 = st.columns([5, 1, 1])
-        with c1:
-            is_renaming = st.session_state.rename_topic_id == t["id"]
-            if is_renaming:
-                new_title = st.text_input(
-                    "重命名话题",
-                    value=t["title"],
-                    key=f"rename_input_{t['id']}",
-                    label_visibility="collapsed",
-                )
-                if st.button("✓", key=f"rename_ok_{t['id']}"):
+        is_renaming = st.session_state.rename_topic_id == t["id"]
+        if is_renaming:
+            new_title = st.text_input(
+                "重命名话题",
+                value=t["title"],
+                key=f"rename_input_{t['id']}",
+                label_visibility="collapsed",
+            )
+            c1, c2 = st.columns([1, 1])
+            with c1:
+                if st.button("✓", key=f"rename_ok_{t['id']}", type="tertiary"):
                     t["title"] = new_title[:30] if new_title.strip() else t["title"]
                     st.session_state.rename_topic_id = None
                     _save_topics(store)
                     st.rerun()
-                if st.button("✕", key=f"rename_cancel_{t['id']}"):
+            with c2:
+                if st.button("✕", key=f"rename_cancel_{t['id']}", type="tertiary"):
                     st.session_state.rename_topic_id = None
                     st.rerun()
-            else:
-                label = f"🐧 {t['title']}" if t["id"] == cur["id"] else f"💬 {t['title']}"
-                if st.button(label, key=f"topic_{t['id']}", use_container_width=True):
+        else:
+            c1, c2, c3 = st.columns([6, 1, 1])
+            with c1:
+                is_active = t["id"] == cur["id"]
+                label = f"{'�' if is_active else '��'} {t['title']}"
+                if st.button(
+                    label,
+                    key=f"topic_{t['id']}",
+                    type="primary" if is_active else "secondary",
+                    use_container_width=True,
+                ):
                     st.session_state.cur_topic[chosen] = t["id"]
                     st.rerun()
-        with c2:
-            if st.button("✎", key=f"topic_rename_{t['id']}", help="重命名"):
-                st.session_state.rename_topic_id = t["id"]
-                st.rerun()
-        with c3:
-            if st.button("🗑", key=f"topic_del_{t['id']}", help="删除"):
-                topics[:] = [x for x in topics if x["id"] != t["id"]]
-                if st.session_state.cur_topic.get(chosen) == t["id"]:
-                    st.session_state.cur_topic[chosen] = (
-                        topics[0]["id"] if topics else None
-                    )
-                if st.session_state.rename_topic_id == t["id"]:
-                    st.session_state.rename_topic_id = None
-                _save_topics(store)
-                st.rerun()
+            with c2:
+                if st.button(
+                    "✎", key=f"topic_rename_{t['id']}", type="tertiary", help="重命名"
+                ):
+                    st.session_state.rename_topic_id = t["id"]
+                    st.rerun()
+            with c3:
+                if st.button(
+                    "🗑", key=f"topic_del_{t['id']}", type="tertiary", help="删除"
+                ):
+                    topics[:] = [x for x in topics if x["id"] != t["id"]]
+                    if st.session_state.cur_topic.get(chosen) == t["id"]:
+                        st.session_state.cur_topic[chosen] = (
+                            topics[0]["id"] if topics else None
+                        )
+                    if st.session_state.rename_topic_id == t["id"]:
+                        st.session_state.rename_topic_id = None
+                    _save_topics(store)
+                    st.rerun()
 
     options = _model_options()
     labels = list(options.keys())
