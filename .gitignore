@@ -2,5 +2,7 @@
 kb_store*.json
 __pycache__/
 *.pyc
-.streamlit/
+history_topics.json
+.streamlit/*
+!.streamlit/config.toml
 venv/

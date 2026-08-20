@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>助手工作台 · 咕咕嘎嘎可爱风设计图</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --cream: #fdf6ec;      /* 奶油沙发 */
+    --yellow: #f2b95c;     /* 暖黄毯子 / 企鹅嘴 */
+    --yellow-soft: #ffe3b3;
+    --ink: #33383f;        /* 企鹅黑 */
+    --blue: #7fb8dd;       /* 小蓝发卡 */
+    --pink: #f6a8b8;       /* 腮红粉 */
+    --card: rgba(255, 252, 246, .86);
+  }
+  body {
+    font-family: "Yuanti SC", "YouYuan", "Comic Sans MS", "Microsoft YaHei", sans-serif;
+    color: var(--ink);
+    background:
+      linear-gradient(rgba(253, 246, 236, .38), rgba(253, 246, 236, .6)),
+      url("assets/penguin.jpg") center / cover fixed no-repeat;
+    min-height: 100vh;
+  }
+  .mock-tag {
+    position: fixed; top: 14px; right: 16px; z-index: 9;
+    background: var(--ink); color: #fff;
+    font-size: 12px; font-weight: 700;
+    padding: 6px 14px; border-radius: 999px;
+    box-shadow: 0 4px 12px rgba(51, 56, 63, .35);
+  }
+  .app { display: flex; gap: 18px; padding: 20px; max-width: 1360px; margin: 0 auto; }
+
+  /* ---------- 侧边栏 ---------- */
+  .sidebar {
+    width: 320px; flex-shrink: 0;
+    background: var(--card); backdrop-filter: blur(12px);
+    border: 2px solid #fff; border-radius: 26px;
+    padding: 22px; height: fit-content;
+    box-shadow: 0 8px 28px rgba(120, 100, 60, .22);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-size: 21px; font-weight: 700; }
+  .brand .logo {
+    width: 46px; height: 46px; border-radius: 50%; overflow: hidden;
+    border: 2px solid #fff; box-shadow: 0 4px 10px rgba(242, 185, 92, .45);
+  }
+  .brand .logo img { width: 100%; height: 100%; object-fit: cover; }
+  label { font-size: 13px; font-weight: 700; color: #8a7a5f; margin: 16px 0 6px; display: block; }
+  .select {
+    width: 100%; background: #fff; border: 2px solid #f3e7d3;
+    border-radius: 14px; padding: 9px 12px; font-size: 14px; color: var(--ink);
+    box-shadow: 0 2px 6px rgba(180, 150, 90, .14);
+    font-family: inherit;
+  }
+  .section-title { font-size: 15px; font-weight: 700; margin: 20px 0 8px; }
+  .upload-box {
+    border: 2px dashed var(--blue); background: rgba(127, 184, 221, .14);
+    border-radius: 16px; padding: 16px 12px; text-align: center;
+    font-size: 13px; color: #5b7a94; line-height: 1.6;
+  }
+  .upload-box .icon { font-size: 22px; display: block; margin-bottom: 4px; }
+  .doc-chip {
+    display: flex; justify-content: space-between; align-items: center;
+    background: #fff; border-radius: 12px; padding: 8px 12px;
+    font-size: 13px; margin-top: 8px;
+    box-shadow: 0 2px 6px rgba(180, 150, 90, .14);
+  }
+  .doc-chip .del { color: var(--pink); font-weight: 700; cursor: pointer; }
+  .caption { font-size: 12px; color: #a08d6d; margin-top: 10px; }
+  .btn-clear {
+    width: 100%; margin-top: 20px; border: none; cursor: pointer;
+    background: var(--ink); color: #fff;
+    border-radius: 999px; padding: 11px;
+    font-size: 14px; font-weight: 700; font-family: inherit;
+    box-shadow: 0 6px 14px rgba(51, 56, 63, .35);
+  }
+
+  /* ---------- 主区域 ---------- */
+  .main { flex: 1; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .welcome {
+    background: var(--card); backdrop-filter: blur(12px);
+    border: 2px solid #fff; border-radius: 26px;
+    padding: 18px 24px; display: flex; gap: 18px; align-items: center;
+    box-shadow: 0 8px 28px rgba(120, 100, 60, .22);
+  }
+  .welcome img {
+    width: 92px; height: 92px; border-radius: 22px; object-fit: cover;
+    border: 3px solid #fff; box-shadow: 0 4px 12px rgba(242, 185, 92, .4);
+  }
+  .welcome h1 { font-size: 20px; margin-bottom: 6px; }
+  .welcome h1 em { font-style: normal; color: var(--yellow); }
+  .welcome p { font-size: 13px; color: #8a7a5f; line-height: 1.6; }
+
+  .chat { display: flex; flex-direction: column; gap: 14px; padding: 4px 2px; }
+  .msg { display: flex; gap: 10px; max-width: 80%; }
+  .msg .avatar {
+    width: 42px; height: 42px; border-radius: 50%; flex-shrink: 0;
+    border: 2px solid #fff; box-shadow: 0 3px 8px rgba(120, 100, 60, .28);
+    display: flex; align-items: center; justify-content: center; font-size: 22px;
+    overflow: hidden; background: #fff;
+  }
+  .msg .avatar img { width: 100%; height: 100%; object-fit: cover; }
+  .bubble {
+    background: var(--card); backdrop-filter: blur(8px);
+    border: 2px solid #fff; border-radius: 20px;
+    padding: 12px 16px; font-size: 14px; line-height: 1.8;
+    box-shadow: 0 4px 14px rgba(120, 100, 60, .18);
+  }
+  .msg.user { align-self: flex-end; flex-direction: row-reverse; }
+  .msg.user .bubble {
+    background: linear-gradient(135deg, #fff3dd, var(--yellow-soft));
+    border-color: #fff8ea;
+  }
+  .bubble b { color: #d99a2b; }
+
+  .input-bar {
+    display: flex; gap: 10px; align-items: center;
+    background: var(--card); backdrop-filter: blur(12px);
+    border: 2px solid #fff; border-radius: 999px;
+    padding: 8px 8px 8px 20px;
+    box-shadow: 0 8px 24px rgba(120, 100, 60, .25);
+  }
+  .input-bar input { flex: 1; border: none; background: transparent; font-size: 14px; outline: none; font-family: inherit; color: var(--ink); }
+  .input-bar button {
+    border: none; cursor: pointer; font-family: inherit;
+    background: var(--yellow); color: #fff;
+    border-radius: 999px; padding: 10px 24px; font-size: 14px; font-weight: 700;
+    box-shadow: 0 4px 12px rgba(242, 185, 92, .5);
+  }
+
+  /* ---------- 设计说明 ---------- */
+  .notes { max-width: 1360px; margin: 8px auto 30px; padding: 0 20px; }
+  .notes-card {
+    background: var(--card); backdrop-filter: blur(12px);
+    border: 2px solid #fff; border-radius: 26px; padding: 22px 26px;
+    box-shadow: 0 8px 28px rgba(120, 100, 60, .22);
+  }
+  .notes-card h2 { font-size: 17px; margin-bottom: 12px; }
+  .notes-card ul { font-size: 13px; line-height: 2; padding-left: 20px; color: #6b5d45; }
+  .swatches { display: flex; gap: 12px; margin: 12px 0; flex-wrap: wrap; }
+  .sw { width: 78px; text-align: center; font-size: 11px; color: #8a7a5f; }
+  .sw i { display: block; height: 44px; border-radius: 12px; margin-bottom: 5px; border: 2px solid #fff; box-shadow: 0 2px 6px rgba(120, 100, 60, .22); }
+</style>
+</head>
+<body>
+  <div class="mock-tag">设计图 · 仅供确认</div>
+  <div class="app">
+    <!-- 侧边栏 -->
+    <aside class="sidebar">
+      <div class="brand"><span class="logo"><img src="assets/penguin.jpg" alt="logo"></span>助手工作台</div>
+
+      <label>当前助手</label>
+      <div class="select">政务产品经理 ▾</div>
+
+      <label>当前大模型</label>
+      <div class="select">DeepSeek（deepseek-chat）▾</div>
+
+      <div class="section-title">📚 知识库（智能检索）</div>
+      <div class="upload-box"><span class="icon">📄</span>拖入或点击上传文档入库<br>txt / md / pdf / docx，可多选</div>
+      <div class="doc-chip"><span>📎 项目需求说明书.docx</span><span class="del">删除</span></div>
+      <div class="doc-chip"><span>📎 立项报告.pdf</span><span class="del">删除</span></div>
+      <div class="caption">知识库：2 个文档 / 36 个分块</div>
+
+      <div class="section-title">📎 本次提问附件</div>
+      <div class="upload-box"><span class="icon">🗂️</span>拖入或点击上传附件<br>（仅本次问题参考，可多选）</div>
+
+      <button class="btn-clear">🗑️ 清空当前对话</button>
+    </aside>
+
+    <!-- 主聊天区 -->
+    <main class="main">
+      <div class="welcome">
+        <img src="assets/penguin.jpg" alt="咕咕嘎嘎">
+        <div>
+          <h1>咕咕嘎嘎来帮你啦～ <em>🐧</em></h1>
+          <p>选择左侧助手与大模型，上传知识库文档后即可提问。<br>可爱模式已开启，工作效率也要萌萌哒！</p>
+        </div>
+      </div>
+
+      <div class="chat">
+        <div class="msg user">
+          <div class="avatar">🙋</div>
+          <div class="bubble">帮我列一份药监局项目立项评审会的会议议程要点～</div>
+        </div>
+        <div class="msg assistant">
+          <div class="avatar"><img src="assets/penguin.jpg" alt="助手头像"></div>
+          <div class="bubble">好呀！结合知识库里的《立项报告》，建议议程如下：<br><b>1. 项目背景与目标</b>（5 分钟）<br><b>2. 需求范围与边界</b>（10 分钟）<br><b>3. 里程碑与资源</b>（10 分钟）<br><b>4. 风险与合规评审</b>（10 分钟）<br><b>5. 结论与下一步</b>（5 分钟）</div>
+        </div>
+      </div>
+
+      <div class="input-bar">
+        <input placeholder="输入你的问题，可配合左侧附件与知识库使用 🐾">
+        <button>发送 ✨</button>
+      </div>
+    </main>
+  </div>
+
+  <!-- 设计说明 -->
+  <div class="notes">
+    <div class="notes-card">
+      <h2>🎨 设计说明</h2>
+      <div class="swatches">
+        <div class="sw"><i style="background:#fdf6ec"></i>奶油沙发<br>#fdf6ec</div>
+        <div class="sw"><i style="background:#f2b95c"></i>暖黄毯子<br>#f2b95c</div>
+        <div class="sw"><i style="background:#33383f"></i>企鹅黑<br>#33383f</div>
+        <div class="sw"><i style="background:#7fb8dd"></i>发卡蓝<br>#7fb8dd</div>
+        <div class="sw"><i style="background:#f6a8b8"></i>腮红粉<br>#f6a8b8</div>
+      </div>
+      <ul>
+        <li><b>背景：</b>使用你提供的咕咕嘎嘎原图（assets/penguin.jpg）满屏铺底，叠加一层浅奶油色半透明渐变，保证文字清晰可读；</li>
+        <li><b>配色：</b>全部从原图提取——奶油白做卡片底、暖黄做强调色（用户气泡 / 发送按钮）、企鹅黑做主按钮、发卡蓝做上传虚线框、腮红粉做删除等小点缀；</li>
+        <li><b>卡片：</b>半透明奶油色毛玻璃 + 白描边 + 大圆角（24~26px）+ 柔和暖色投影；</li>
+        <li><b>形象：</b>侧边栏 logo、欢迎卡片、助手头像均使用咕咕嘎嘎原图裁切；</li>
+        <li><b>落地方式：</b>Streamlit 主题（.streamlit/config.toml）+ 自定义 CSS 注入，背景与头像引用本地 assets/penguin.jpg，不改动现有业务逻辑。</li>
+      </ul>
+    </div>
+  </div>
+</body>
+</html>

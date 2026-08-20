@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
-"""助手工作台（本地 Web 界面版，支持多助手切换 / 大模型选择 / 文件上传 / 各助手独立知识库 RAG）
+"""助手工作台（本地 Web 界面版，支持多助手切换 / 大模型选择 / 对话框附件 / 历史话题 / 各助手独立知识库 RAG）
 
 启动：python -m streamlit run app.py --server.headless true --browser.gatherUsageStats false
 """
+import base64
+import json
 import os
+import time
+import uuid
 from pathlib import Path
 
 import streamlit as st
@@ -14,14 +18,16 @@ import kb
 
 BASE_DIR = Path(__file__).parent
 PROMPTS_DIR = BASE_DIR / "prompts"
+PENGUIN_IMG = BASE_DIR / "assets" / "penguin.jpg"
 
-st.set_page_config(page_title="助手工作台", page_icon="📋", layout="wide")
+st.set_page_config(page_title="助手工作台", page_icon="🐧", layout="wide")
 
 # ---------- 初始化 ----------
 load_dotenv(BASE_DIR / ".env")
 
-UPLOAD_TYPES = ["txt", "md", "pdf", "docx"]
+UPLOAD_TYPES = ["txt", "md", "pdf", "docx", "pptx", "xlsx"]
 MAX_UPLOAD_CHARS = 8000  # 本次附件注入上下文的最大字符数
+HISTORY_FILE = BASE_DIR / "history_topics.json"  # 历史话题本地持久化
 
 
 def _model_options():
@@ -55,7 +61,7 @@ def get_client(api_key: str, base_url: str):
 
 
 def extract_text(uploaded_file) -> str:
-    """从上传文件提取纯文本，支持 txt/md/pdf/docx。"""
+    """从上传文件提取纯文本，支持 txt/md/pdf/docx/pptx/xlsx。"""
     ext = uploaded_file.name.rsplit(".", 1)[-1].lower()
     if ext in ("txt", "md", "markdown", "csv", "log"):
         return uploaded_file.read().decode("utf-8", errors="ignore")
@@ -68,11 +74,175 @@ def extract_text(uploaded_file) -> str:
         import docx
 
         return "\n".join(p.text for p in docx.Document(uploaded_file).paragraphs)
+    if ext == "pptx":
+        from pptx import Presentation
+
+        texts = []
+        for slide in Presentation(uploaded_file).slides:
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    texts.append(
+                        "\n".join(p.text for p in shape.text_frame.paragraphs)
+                    )
+        return "\n".join(t for t in texts if t.strip())
+    if ext == "xlsx":
+        import openpyxl
+
+        wb = openpyxl.load_workbook(uploaded_file, read_only=True, data_only=True)
+        lines = []
+        for ws in wb.worksheets:
+            lines.append(f"[工作表：{ws.title}]")
+            for row in ws.iter_rows(values_only=True):
+                cells = [str(c) for c in row if c is not None]
+                if cells:
+                    lines.append("\t".join(cells))
+        return "\n".join(lines)
     raise ValueError(f"不支持的文件类型：{ext}")
 
 
-if "histories" not in st.session_state:
-    st.session_state.histories = {}
+def _load_topics() -> dict:
+    """读取历史话题（按助手名分组）。"""
+    if HISTORY_FILE.exists():
+        try:
+            return json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_topics(store: dict):
+    HISTORY_FILE.write_text(
+        json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def _new_topic() -> dict:
+    return {
+        "id": uuid.uuid4().hex[:8],
+        "title": "新话题",
+        "created": time.time(),
+        "messages": [],
+    }
+
+
+@st.cache_resource
+def _penguin_b64() -> str:
+    """企鹅形象图转 base64，供 CSS 背景与欢迎卡片内联使用。"""
+    return base64.b64encode(PENGUIN_IMG.read_bytes()).decode("ascii")
+
+
+CUSTOM_CSS = """
+<style>
+  .stApp, body {
+    background: linear-gradient(rgba(253,246,236,.38), rgba(253,246,236,.6)),
+      url("data:image/jpeg;base64,__PENGUIN_B64__") center / cover fixed no-repeat !important;
+  }
+  header[data-testid="stHeader"] { background: transparent !important; }
+  footer { visibility: hidden; }
+
+  /* 侧边栏：奶油毛玻璃 */
+  section[data-testid="stSidebar"] {
+    background: rgba(255,252,246,.88) !important;
+    backdrop-filter: blur(12px);
+    border-right: 2px solid #fff;
+  }
+
+  /* 聊天气泡：奶油毛玻璃圆角卡片 */
+  div[data-testid="stChatMessage"] {
+    background: rgba(255,252,246,.88) !important;
+    border: 2px solid #fff;
+    border-radius: 20px;
+    box-shadow: 0 4px 14px rgba(120,100,60,.18);
+    backdrop-filter: blur(8px);
+  }
+  div[data-testid="stChatMessageAvatar"] img {
+    border-radius: 50%;
+    border: 2px solid #fff;
+    box-shadow: 0 3px 8px rgba(120,100,60,.28);
+  }
+
+  /* 输入框：胶囊形 */
+  div[data-testid="stChatInput"] {
+    border-radius: 999px !important;
+    border: 2px solid #fff !important;
+    background: rgba(255,252,246,.9) !important;
+    box-shadow: 0 8px 24px rgba(120,100,60,.25) !important;
+  }
+  div[data-testid="stChatInput"] textarea { background: transparent !important; }
+  div[data-testid="stBottom"] > div { background: transparent !important; }
+  /* 去掉内层嵌套容器的白底/边框，避免输入框看起来两层重叠 */
+  div[data-testid="stChatInput"] > div {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+  }
+  /* 附件按钮：默认“+”号换成曲别针图标 */
+  div[data-testid="stChatInputFileUploadButton"] button svg { display: none !important; }
+  div[data-testid="stChatInputFileUploadButton"] button::before {
+    content: "📎";
+    font-size: 18px;
+    line-height: 1;
+  }
+
+  /* 按钮：企鹅黑胶囊 */
+  div.stButton > button {
+    border-radius: 999px !important;
+    background: #33383f !important;
+    color: #fff !important;
+    border: none !important;
+    font-weight: 700;
+  }
+
+  /* 上传区：发卡蓝虚线圆角 */
+  div[data-testid="stFileUploadDropzone"] {
+    border: 2px dashed #7fb8dd !important;
+    border-radius: 16px !important;
+    background: rgba(127,184,221,.14) !important;
+  }
+
+  /* 下拉框：圆角白底 */
+  div[data-testid="stSelectbox"] > div {
+    border-radius: 14px !important;
+    border: 2px solid #f3e7d3 !important;
+    background: #fff !important;
+  }
+
+  /* 欢迎卡片 */
+  .penguin-welcome {
+    display: flex; gap: 18px; align-items: center;
+    background: rgba(255,252,246,.88); border: 2px solid #fff; border-radius: 26px;
+    padding: 18px 24px; margin: 4px 0 12px;
+    box-shadow: 0 8px 28px rgba(120,100,60,.22); backdrop-filter: blur(12px);
+  }
+  .penguin-welcome img {
+    width: 92px; height: 92px; border-radius: 22px; object-fit: cover;
+    border: 3px solid #fff; box-shadow: 0 4px 12px rgba(242,185,92,.4);
+  }
+  .penguin-welcome h1 { font-size: 20px; margin: 0 0 6px; color: #33383f; }
+  .penguin-welcome p { font-size: 13px; color: #8a7a5f; margin: 0; }
+</style>
+"""
+
+
+def inject_cute_theme():
+    """注入咕咕嘎嘎可爱风：背景图 + 欢迎卡片。"""
+    b64 = _penguin_b64()
+    st.markdown(CUSTOM_CSS.replace("__PENGUIN_B64__", b64), unsafe_allow_html=True)
+    st.markdown(
+        '<div class="penguin-welcome">'
+        f'<img src="data:image/jpeg;base64,{b64}" alt="咕咕嘎嘎">'
+        "<div><h1>咕咕嘎嘎来帮你啦～ 🐧</h1>"
+        "<p>选择左侧助手与大模型，上传知识库文档后即可提问。可爱模式已开启，工作效率也要萌萌哒！</p></div></div>",
+        unsafe_allow_html=True,
+    )
+
+
+if "topic_store" not in st.session_state:
+    st.session_state.topic_store = _load_topics()
+if "cur_topic" not in st.session_state:
+    st.session_state.cur_topic = {}
+
+inject_cute_theme()
 
 # ---------- 侧边栏 ----------
 with st.sidebar:
@@ -87,10 +257,47 @@ with st.sidebar:
         st.session_state.pop("assistant_sel", None)
     chosen = st.selectbox("当前助手", names, key="assistant_sel")
     SYSTEM_PROMPT = assistants[chosen].read_text(encoding="utf-8").strip()
-    messages = st.session_state.histories.setdefault(chosen, [])
     knowledge_base = kb.KnowledgeBase(chosen)  # 各助手知识库独立存储
 
-    st.title(f"📋 {chosen}")
+    st.title(f"🐧 {chosen}")
+
+    # ---------- 历史话题（各助手独立，上下文互不串扰） ----------
+    store = st.session_state.topic_store
+    topics = store.setdefault(chosen, [])
+    cur = next(
+        (t for t in topics if t["id"] == st.session_state.cur_topic.get(chosen)),
+        None,
+    )
+    if cur is None:  # 首次进入或当前话题已被删除
+        cur = _new_topic()
+        topics.insert(0, cur)
+        st.session_state.cur_topic[chosen] = cur["id"]
+        _save_topics(store)
+    messages = cur["messages"]
+
+    st.subheader("历史对话")
+    if st.button("＋ 新建话题", use_container_width=True, key="new_topic"):
+        cur = _new_topic()
+        topics.insert(0, cur)
+        st.session_state.cur_topic[chosen] = cur["id"]
+        _save_topics(store)
+        st.rerun()
+    for t in topics:
+        c1, c2 = st.columns([6, 1])
+        with c1:
+            label = f"🐧 {t['title']}" if t["id"] == cur["id"] else f"💬 {t['title']}"
+            if st.button(label, key=f"topic_{t['id']}", use_container_width=True):
+                st.session_state.cur_topic[chosen] = t["id"]
+                st.rerun()
+        with c2:
+            if st.button("✕", key=f"topic_del_{t['id']}"):
+                topics[:] = [x for x in topics if x["id"] != t["id"]]
+                if st.session_state.cur_topic.get(chosen) == t["id"]:
+                    st.session_state.cur_topic[chosen] = (
+                        topics[0]["id"] if topics else None
+                    )
+                _save_topics(store)
+                st.rerun()
 
     options = _model_options()
     labels = list(options.keys())
@@ -111,7 +318,7 @@ with st.sidebar:
         st.warning("未配置向量化服务（.env 中的 EMBEDDING_* 配置项），知识库暂不可用。")
 
     kb_files = st.file_uploader(
-        "拖入或点击上传文档入库（txt/md/pdf/docx，可多选）",
+        "拖入或点击上传文档入库（txt/md/pdf/docx/pptx/xlsx，可多选）",
         type=UPLOAD_TYPES,
         key="kb_uploader",
         accept_multiple_files=True,
@@ -144,33 +351,33 @@ with st.sidebar:
             knowledge_base.clear()
             st.rerun()
 
-    st.subheader("本次提问附件")
-    chat_files = st.file_uploader(
-        "拖入或点击上传附件（仅本次问题参考，可多选）",
-        type=UPLOAD_TYPES,
-        key="chat_uploader",
-        accept_multiple_files=True,
-    )
-
-    if st.button("🗑️ 清空当前对话", use_container_width=True):
-        messages.clear()
-        st.rerun()
-
 # ---------- 历史消息 ----------
 for msg in messages:
-    with st.chat_message(msg["role"]):
+    with st.chat_message(
+        msg["role"],
+        avatar=str(PENGUIN_IMG) if msg["role"] == "assistant" else None,
+    ):
         st.markdown(msg["display"])
 
 # ---------- 输入与回复 ----------
-user_input = st.chat_input("输入你的问题，可配合左侧附件与知识库使用")
-if user_input:
+submission = st.chat_input(
+    "输入你的问题，📎可添加附件（悬浮📎查看支持格式）",
+    accept_file="multiple",
+    file_type=UPLOAD_TYPES,
+)
+if submission and ((submission.text or "").strip() or submission.files):
+    user_input = (submission.text or "").strip()
+    chat_files = list(submission.files or [])
+    if not user_input and chat_files:
+        user_input = "请结合我上传的附件内容进行回答。"
+
     if client is None:
         st.error("请先在 .env 中配置大模型密钥（OPENAI_API_KEY 或 EMBEDDING_API_KEY）。")
         st.stop()
 
     # 1) 本次附件文本（多文件拼接）
     upload_parts = []
-    for f in chat_files or []:
+    for f in chat_files:
         try:
             full = extract_text(f)
             part = full[:MAX_UPLOAD_CHARS]
@@ -205,13 +412,18 @@ if user_input:
     ]
     api_content = "\n\n".join(parts)
 
-    messages.append(
-        {"role": "user", "display": user_input, "content": api_content}
-    )
+    display = user_input
+    if chat_files:
+        display += "\n\n📎 " + "、".join(f.name for f in chat_files)
+    messages.append({"role": "user", "display": display, "content": api_content})
+    title_changed = False
+    if len(messages) == 1:  # 话题首条消息自动作为话题标题
+        cur["title"] = user_input.replace("\n", " ")[:18]
+        title_changed = True
     with st.chat_message("user"):
-        st.markdown(user_input)
+        st.markdown(display)
 
-    with st.chat_message("assistant"):
+    with st.chat_message("assistant", avatar=str(PENGUIN_IMG)):
         try:
             stream = client.chat.completions.create(
                 model=model_name,
@@ -238,3 +450,6 @@ if user_input:
         except Exception as e:  # 网络/鉴权/模型错误，保留会话可重试
             messages.pop()
             st.error(f"调用失败：{e}")
+    _save_topics(store)  # 话题内容本地持久化
+    if title_changed:  # 侧边栏先于提问渲染，标题变化后刷新一次以同步显示
+        st.rerun()
