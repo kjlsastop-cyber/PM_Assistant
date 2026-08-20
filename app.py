@@ -18,6 +18,7 @@ import kb
 
 BASE_DIR = Path(__file__).parent
 PROMPTS_DIR = BASE_DIR / "prompts"
+STYLES_DIR = BASE_DIR / "styles"
 PENGUIN_IMG = BASE_DIR / "assets" / "penguin.jpg"
 
 st.set_page_config(page_title="助手工作台", page_icon="🐧", layout="wide")
@@ -27,7 +28,12 @@ load_dotenv(BASE_DIR / ".env")
 
 UPLOAD_TYPES = ["txt", "md", "pdf", "docx", "pptx", "xlsx"]
 MAX_UPLOAD_CHARS = 8000  # 本次附件注入上下文的最大字符数
+MAX_HISTORY_ROUNDS = int(os.getenv("MAX_HISTORY_ROUNDS", "10"))  # 历史对话最大轮数
+MAX_HISTORY_CHARS = int(os.getenv("MAX_HISTORY_CHARS", "8000"))  # 历史对话最大字符数
 HISTORY_FILE = BASE_DIR / "history_topics.json"  # 历史话题本地持久化
+REVIEW_ENABLED = os.getenv("REVIEW_ENABLED", "true").strip().lower() == "true"
+REVIEW_MODEL = os.getenv("REVIEWER_MODEL", "").strip()  # 留空则复用当前对话模型
+REVIEW_TEMP = float(os.getenv("REVIEW_TEMPERATURE", "0.3"))  # 审查温度，低温度确保审查稳定
 
 
 def _model_options():
@@ -60,6 +66,12 @@ def get_client(api_key: str, base_url: str):
     return OpenAI(api_key=api_key, base_url=base_url)
 
 
+@st.cache_resource
+def _get_kb(kb_id: str) -> kb.KnowledgeBase:
+    """缓存 KnowledgeBase 实例，避免每次交互重复加载。"""
+    return kb.KnowledgeBase(kb_id)
+
+
 def extract_text(uploaded_file) -> str:
     """从上传文件提取纯文本，支持 txt/md/pdf/docx/pptx/xlsx。"""
     ext = uploaded_file.name.rsplit(".", 1)[-1].lower()
@@ -73,7 +85,20 @@ def extract_text(uploaded_file) -> str:
     if ext == "docx":
         import docx
 
-        return "\n".join(p.text for p in docx.Document(uploaded_file).paragraphs)
+        doc = docx.Document(uploaded_file)
+        parts = []
+        for p in doc.paragraphs:
+            if p.text.strip():
+                parts.append(p.text)
+        for table in doc.tables:
+            table_rows = []
+            for row in table.rows:
+                cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                if cells:
+                    table_rows.append(" | ".join(cells))
+            if table_rows:
+                parts.append("[表格]\n" + "\n".join(table_rows))
+        return "\n".join(parts)
     if ext == "pptx":
         from pptx import Presentation
 
@@ -84,6 +109,14 @@ def extract_text(uploaded_file) -> str:
                     texts.append(
                         "\n".join(p.text for p in shape.text_frame.paragraphs)
                     )
+                if shape.has_table:
+                    table_rows = []
+                    for row in shape.table.rows:
+                        cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                        if cells:
+                            table_rows.append(" | ".join(cells))
+                    if table_rows:
+                        texts.append("[表格]\n" + "\n".join(table_rows))
         return "\n".join(t for t in texts if t.strip())
     if ext == "xlsx":
         import openpyxl
@@ -98,6 +131,43 @@ def extract_text(uploaded_file) -> str:
                     lines.append("\t".join(cells))
         return "\n".join(lines)
     raise ValueError(f"不支持的文件类型：{ext}")
+
+
+def _truncate_history(messages: list, max_rounds: int = MAX_HISTORY_ROUNDS,
+                      max_chars: int = MAX_HISTORY_CHARS) -> list:
+    """截断历史对话：保留最近 N 轮对话，同时限制总字符数。
+    始终保留 system 消息（通过外部传入），仅截断 user/assistant 轮次。
+    """
+    if not messages:
+        return messages
+
+    non_system = [m for m in messages if m["role"] != "system"]
+    system_msgs = [m for m in messages if m["role"] == "system"]
+
+    # 按轮次倒序保留（一轮 = 一个 user + 一个 assistant）
+    rounds = []
+    i = len(non_system) - 1
+    while i >= 0:
+        if non_system[i]["role"] == "assistant" and i > 0 and non_system[i - 1]["role"] == "user":
+            rounds.insert(0, [non_system[i - 1], non_system[i]])
+            i -= 2
+        else:
+            rounds.insert(0, [non_system[i]])
+            i -= 1
+        if len(rounds) >= max_rounds:
+            break
+
+    # 限制总字符数
+    result_msgs = []
+    total_chars = 0
+    for round_pair in reversed(rounds):
+        round_chars = sum(len(m.get("content", "")) for m in round_pair)
+        if total_chars + round_chars > max_chars and result_msgs:
+            break
+        result_msgs = round_pair + result_msgs
+        total_chars += round_chars
+
+    return system_msgs + result_msgs
 
 
 def _load_topics() -> dict:
@@ -131,103 +201,21 @@ def _penguin_b64() -> str:
     return base64.b64encode(PENGUIN_IMG.read_bytes()).decode("ascii")
 
 
-CUSTOM_CSS = """
-<style>
-  .stApp, body {
-    background: linear-gradient(rgba(253,246,236,.38), rgba(253,246,236,.6)),
-      url("data:image/jpeg;base64,__PENGUIN_B64__") center / cover fixed no-repeat !important;
-  }
-  header[data-testid="stHeader"] { background: transparent !important; }
-  footer { visibility: hidden; }
-
-  /* 侧边栏：奶油毛玻璃 */
-  section[data-testid="stSidebar"] {
-    background: rgba(255,252,246,.88) !important;
-    backdrop-filter: blur(12px);
-    border-right: 2px solid #fff;
-  }
-
-  /* 聊天气泡：奶油毛玻璃圆角卡片 */
-  div[data-testid="stChatMessage"] {
-    background: rgba(255,252,246,.88) !important;
-    border: 2px solid #fff;
-    border-radius: 20px;
-    box-shadow: 0 4px 14px rgba(120,100,60,.18);
-    backdrop-filter: blur(8px);
-  }
-  div[data-testid="stChatMessageAvatar"] img {
-    border-radius: 50%;
-    border: 2px solid #fff;
-    box-shadow: 0 3px 8px rgba(120,100,60,.28);
-  }
-
-  /* 输入框：胶囊形 */
-  div[data-testid="stChatInput"] {
-    border-radius: 999px !important;
-    border: 2px solid #fff !important;
-    background: rgba(255,252,246,.9) !important;
-    box-shadow: 0 8px 24px rgba(120,100,60,.25) !important;
-  }
-  div[data-testid="stChatInput"] textarea { background: transparent !important; }
-  div[data-testid="stBottom"] > div { background: transparent !important; }
-  /* 去掉内层嵌套容器的白底/边框，避免输入框看起来两层重叠 */
-  div[data-testid="stChatInput"] > div {
-    background: transparent !important;
-    border: none !important;
-    box-shadow: none !important;
-  }
-  /* 附件按钮：默认“+”号换成曲别针图标 */
-  div[data-testid="stChatInputFileUploadButton"] button svg { display: none !important; }
-  div[data-testid="stChatInputFileUploadButton"] button::before {
-    content: "📎";
-    font-size: 18px;
-    line-height: 1;
-  }
-
-  /* 按钮：企鹅黑胶囊 */
-  div.stButton > button {
-    border-radius: 999px !important;
-    background: #33383f !important;
-    color: #fff !important;
-    border: none !important;
-    font-weight: 700;
-  }
-
-  /* 上传区：发卡蓝虚线圆角 */
-  div[data-testid="stFileUploadDropzone"] {
-    border: 2px dashed #7fb8dd !important;
-    border-radius: 16px !important;
-    background: rgba(127,184,221,.14) !important;
-  }
-
-  /* 下拉框：圆角白底 */
-  div[data-testid="stSelectbox"] > div {
-    border-radius: 14px !important;
-    border: 2px solid #f3e7d3 !important;
-    background: #fff !important;
-  }
-
-  /* 欢迎卡片 */
-  .penguin-welcome {
-    display: flex; gap: 18px; align-items: center;
-    background: rgba(255,252,246,.88); border: 2px solid #fff; border-radius: 26px;
-    padding: 18px 24px; margin: 4px 0 12px;
-    box-shadow: 0 8px 28px rgba(120,100,60,.22); backdrop-filter: blur(12px);
-  }
-  .penguin-welcome img {
-    width: 92px; height: 92px; border-radius: 22px; object-fit: cover;
-    border: 3px solid #fff; box-shadow: 0 4px 12px rgba(242,185,92,.4);
-  }
-  .penguin-welcome h1 { font-size: 20px; margin: 0 0 6px; color: #33383f; }
-  .penguin-welcome p { font-size: 13px; color: #8a7a5f; margin: 0; }
-</style>
-"""
+def _load_css() -> str:
+    """从 styles/app.css 加载主题样式，替换企鹅 base64 占位符。"""
+    css_file = STYLES_DIR / "app.css"
+    if css_file.exists():
+        css = css_file.read_text(encoding="utf-8")
+    else:
+        css = "<style></style>"
+    return css
 
 
 def inject_cute_theme():
     """注入咕咕嘎嘎可爱风：背景图 + 欢迎卡片。"""
     b64 = _penguin_b64()
-    st.markdown(CUSTOM_CSS.replace("__PENGUIN_B64__", b64), unsafe_allow_html=True)
+    css = _load_css().replace("__PENGUIN_B64__", b64)
+    st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
     st.markdown(
         '<div class="penguin-welcome">'
         f'<img src="data:image/jpeg;base64,{b64}" alt="咕咕嘎嘎">'
@@ -237,10 +225,47 @@ def inject_cute_theme():
     )
 
 
+@st.cache_resource
+def _reviewer_prompt() -> str:
+    """加载审查员系统提示词。"""
+    f = PROMPTS_DIR / "reviewer.md"
+    if f.exists():
+        return f.read_text(encoding="utf-8").strip()
+    return "你是一名严格的 AI 输出审查员，请对回复进行结构化质量审查并按指定格式输出。"
+
+
+def _run_self_review(client, model_name: str, query: str,
+                     kb_context: str, upload_context: str,
+                     assistant_reply: str) -> str | None:
+    """执行自我审查，返回审查结果文本；失败返回 None。"""
+    reviewer_system = _reviewer_prompt()
+    review_user = (
+        f"【用户问题】\n{query}\n\n"
+        f"【知识库检索资料】\n{kb_context or '（无）'}\n\n"
+        f"【本次上传文件】\n{upload_context or '（无）'}\n\n"
+        f"【助手回复】\n{assistant_reply}\n\n"
+        "请按审查维度逐项评估并输出结果。"
+    )
+    try:
+        resp = client.chat.completions.create(
+            model=REVIEW_MODEL or model_name,
+            temperature=REVIEW_TEMP,
+            messages=[
+                {"role": "system", "content": reviewer_system},
+                {"role": "user", "content": review_user},
+            ],
+        )
+        return resp.choices[0].message.content
+    except Exception:
+        return None
+
+
 if "topic_store" not in st.session_state:
     st.session_state.topic_store = _load_topics()
 if "cur_topic" not in st.session_state:
     st.session_state.cur_topic = {}
+if "rename_topic_id" not in st.session_state:
+    st.session_state.rename_topic_id = None
 
 inject_cute_theme()
 
@@ -257,7 +282,7 @@ with st.sidebar:
         st.session_state.pop("assistant_sel", None)
     chosen = st.selectbox("当前助手", names, key="assistant_sel")
     SYSTEM_PROMPT = assistants[chosen].read_text(encoding="utf-8").strip()
-    knowledge_base = kb.KnowledgeBase(chosen)  # 各助手知识库独立存储
+    knowledge_base = _get_kb(chosen)  # 使用缓存的知识库实例
 
     st.title(f"🐧 {chosen}")
 
@@ -282,20 +307,44 @@ with st.sidebar:
         st.session_state.cur_topic[chosen] = cur["id"]
         _save_topics(store)
         st.rerun()
+
     for t in topics:
-        c1, c2 = st.columns([6, 1])
+        c1, c2, c3 = st.columns([5, 1, 1])
         with c1:
-            label = f"🐧 {t['title']}" if t["id"] == cur["id"] else f"💬 {t['title']}"
-            if st.button(label, key=f"topic_{t['id']}", use_container_width=True):
-                st.session_state.cur_topic[chosen] = t["id"]
-                st.rerun()
+            is_renaming = st.session_state.rename_topic_id == t["id"]
+            if is_renaming:
+                new_title = st.text_input(
+                    "重命名话题",
+                    value=t["title"],
+                    key=f"rename_input_{t['id']}",
+                    label_visibility="collapsed",
+                )
+                if st.button("✓", key=f"rename_ok_{t['id']}"):
+                    t["title"] = new_title[:30] if new_title.strip() else t["title"]
+                    st.session_state.rename_topic_id = None
+                    _save_topics(store)
+                    st.rerun()
+                if st.button("✕", key=f"rename_cancel_{t['id']}"):
+                    st.session_state.rename_topic_id = None
+                    st.rerun()
+            else:
+                label = f"🐧 {t['title']}" if t["id"] == cur["id"] else f"💬 {t['title']}"
+                if st.button(label, key=f"topic_{t['id']}", use_container_width=True):
+                    st.session_state.cur_topic[chosen] = t["id"]
+                    st.rerun()
         with c2:
-            if st.button("✕", key=f"topic_del_{t['id']}"):
+            if st.button("✎", key=f"topic_rename_{t['id']}", help="重命名"):
+                st.session_state.rename_topic_id = t["id"]
+                st.rerun()
+        with c3:
+            if st.button("🗑", key=f"topic_del_{t['id']}", help="删除"):
                 topics[:] = [x for x in topics if x["id"] != t["id"]]
                 if st.session_state.cur_topic.get(chosen) == t["id"]:
                     st.session_state.cur_topic[chosen] = (
                         topics[0]["id"] if topics else None
                     )
+                if st.session_state.rename_topic_id == t["id"]:
+                    st.session_state.rename_topic_id = None
                 _save_topics(store)
                 st.rerun()
 
@@ -311,6 +360,16 @@ with st.sidebar:
     else:
         client = None
         st.error("未配置任何大模型密钥，请编辑 .env 文件后刷新页面。")
+
+    st.subheader("Agent 自我审查")
+    review_enabled = st.toggle(
+        "启用回复审查",
+        value=REVIEW_ENABLED,
+        help="每次回复后自动进行质量审查（准确性/完整性/合规性等），审查结果可展开查看",
+    )
+    if review_enabled:
+        review_model_label = REVIEW_MODEL or "复用当前对话模型"
+        st.caption(f"审查模型：{review_model_label} | 温度：{REVIEW_TEMP}")
 
     st.subheader("知识库（智能检索）")
     embedding_ready = kb.get_embedding_client() is not None
@@ -346,9 +405,11 @@ with st.sidebar:
         for name in doc_names:
             if st.button(f"删除：{name}", key=f"del_{name}"):
                 knowledge_base.remove_document(name)
+                _get_kb.clear()  # 清除缓存以便下次重新加载
                 st.rerun()
         if st.button("清空知识库"):
             knowledge_base.clear()
+            _get_kb.clear()
             st.rerun()
 
 # ---------- 历史消息 ----------
@@ -358,6 +419,9 @@ for msg in messages:
         avatar=str(PENGUIN_IMG) if msg["role"] == "assistant" else None,
     ):
         st.markdown(msg["display"])
+        if msg["role"] == "assistant" and msg.get("review"):
+            with st.expander("🔍 自我审查结果", expanded=False):
+                st.markdown(msg["review"])
 
 # ---------- 输入与回复 ----------
 submission = st.chat_input(
@@ -390,9 +454,11 @@ if submission and ((submission.text or "").strip() or submission.files):
 
     # 2) 知识库检索
     kb_section = ""
+    retrieval_hits = []
     if knowledge_base.entries and embedding_ready:
         try:
             hits = knowledge_base.search(user_input)
+            retrieval_hits = hits
             if hits:
                 kb_section = "【知识库检索资料】\n" + "\n\n".join(
                     f"[来源：{h['doc']}]\n{h['text']}" for h in hits
@@ -412,6 +478,11 @@ if submission and ((submission.text or "").strip() or submission.files):
     ]
     api_content = "\n\n".join(parts)
 
+    # 4) 上下文截断：发送给模型的历史对话
+    messages_for_api = _truncate_history(
+        [{"role": "system", "content": SYSTEM_PROMPT}] + messages
+    )
+
     display = user_input
     if chat_files:
         display += "\n\n📎 " + "、".join(f.name for f in chat_files)
@@ -427,11 +498,7 @@ if submission and ((submission.text or "").strip() or submission.files):
         try:
             stream = client.chat.completions.create(
                 model=model_name,
-                messages=[{"role": "system", "content": SYSTEM_PROMPT}]
-                + [
-                    {"role": m["role"], "content": m["content"]}
-                    for m in messages
-                ],
+                messages=messages_for_api,
                 stream=True,
             )
 
@@ -444,9 +511,50 @@ if submission and ((submission.text or "").strip() or submission.files):
                         yield content
 
             reply = st.write_stream(_content_stream())
-            messages.append(
-                {"role": "assistant", "display": reply, "content": reply}
-            )
+            assistant_msg = {"role": "assistant", "display": reply, "content": reply}
+            messages.append(assistant_msg)
+
+            # 5) 检索来源展示（可展开）
+            if retrieval_hits:
+                with st.expander(f"📚 检索来源（{len(retrieval_hits)} 条）", expanded=False):
+                    for i, hit in enumerate(retrieval_hits, 1):
+                        st.markdown(
+                            f"**{i}. {hit['doc']}**  "
+                            f"<small>相关度: {hit.get('score', 0):.2f}</small>",
+                            unsafe_allow_html=True,
+                        )
+                        st.markdown(f"> {hit['text'][:200]}{'...' if len(hit['text']) > 200 else ''}")
+
+            # 6) Agent 自我审查（可展开）
+            if review_enabled and client is not None:
+                with st.spinner("🔍 Agent 自我审查中…"):
+                    review_result = _run_self_review(
+                        client=client,
+                        model_name=model_name,
+                        query=user_input,
+                        kb_context=kb_section,
+                        upload_context=upload_text,
+                        assistant_reply=reply,
+                    )
+                if review_result:
+                    assistant_msg["review"] = review_result
+                    verdict = "warn"
+                    for line in review_result.split("\n"):
+                        if "总体评级" in line:
+                            if "pass" in line.lower():
+                                verdict = "pass"
+                            elif "fail" in line.lower():
+                                verdict = "fail"
+                            break
+                    verdict_icon = {"pass": "✅", "warn": "⚠️", "fail": "❌"}.get(verdict, "⚠️")
+                    verdict_label = {"pass": "通过", "warn": "注意", "fail": "不通过"}.get(verdict, "审查")
+                    with st.expander(
+                        f"{verdict_icon} 自我审查：{verdict_label}",
+                        expanded=(verdict == "fail"),
+                    ):
+                        st.markdown(review_result)
+                else:
+                    st.caption("🔍 自我审查：审查服务暂不可用，已跳过。")
         except Exception as e:  # 网络/鉴权/模型错误，保留会话可重试
             messages.pop()
             st.error(f"调用失败：{e}")

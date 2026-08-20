@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """产品经理助手 Agent（本地命令行版）
 
+[已弃用] 此 CLI 版本已停止维护，请使用 Web 版本：
+  python -m streamlit run app.py --server.headless true --browser.gatherUsageStats false
+
 使用 OpenAI 兼容接口，可对接 OpenAI / DeepSeek / 通义 / 本地 Ollama 等。
 配置见 .env（参考 .env.example）。
 """
