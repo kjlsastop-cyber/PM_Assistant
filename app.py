@@ -548,14 +548,13 @@ def _build_docx(topic_title: str, messages: list) -> bytes:
     遵循 anthropics/skills docx 最佳实践：
     - 使用内置 Heading 样式（非自定义），确保目录自动生成
     - 列表使用 numbering/bullet 而非手动 • 字符
-    - 表格使用 dual widths（列宽 + 单元格宽）
     - 页边距、页码、页眉页脚完整
-    - 不使用 \\n，用独立 Paragraph
+    - display 为空时回退到 content 字段
+    - 空内容兜底，确保文档不空白
     """
     from docx import Document
     from docx.shared import Inches, Pt, Emu, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.enum.table import WD_TABLE_ALIGNMENT
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
 
@@ -616,8 +615,9 @@ def _build_docx(topic_title: str, messages: list) -> bytes:
     run5.font.size = Pt(9)
     run5.font.color.rgb = RGBColor(0x8A, 0x7A, 0x5F)
 
-    # --- 文档标题（Heading 0 = Title）---
-    title_h = doc.add_heading(topic_title or "对话记录", level=0)
+    # --- 文档标题 ---
+    doc_title = topic_title or "对话记录"
+    title_h = doc.add_heading(doc_title, level=0)
     for run in title_h.runs:
         run.font.color.rgb = RGBColor(0x1E, 0x3A, 0x5F)
 
@@ -634,36 +634,57 @@ def _build_docx(topic_title: str, messages: list) -> bytes:
     sep_run.font.color.rgb = RGBColor(0xF2, 0xB9, 0x5C)
 
     # --- 对话内容 ---
+    content_written = False
+    body_font = RGBColor(0x33, 0x33, 0x33)
+
     for m in messages:
         if m.get("greeting"):
             continue
-        role = m["role"]
-        display = m.get("display", "").strip()
-        if not display:
+
+        # 健壮的内容提取：display → content → 空
+        text = (m.get("display") or m.get("content") or "").strip()
+        if not text:
             continue
 
-        # 角色标题
-        if role == "user":
-            h = doc.add_heading("🧑 用户提问", level=2)
-            for run in h.runs:
-                run.font.color.rgb = RGBColor(0x1E, 0x3A, 0x5F)
-        else:
-            h = doc.add_heading("🐧 助手回答", level=2)
-            for run in h.runs:
-                run.font.color.rgb = RGBColor(0x1E, 0x3A, 0x5F)
+        content_written = True
+        role = m["role"]
 
-        # 正文段落（按 \n 拆分，每段独立 Paragraph）
-        for line in display.split("\n"):
+        # 角色分隔
+        separator = doc.add_paragraph()
+        sep_run2 = separator.add_run("━" * 40)
+        sep_run2.font.size = Pt(6)
+        sep_run2.font.color.rgb = RGBColor(0xD0, 0xD0, 0xD0)
+
+        # 角色标签
+        if role == "user":
+            h = doc.add_heading("🧑 用户", level=2)
+        else:
+            h = doc.add_heading("🐧 助手", level=2)
+        for run in h.runs:
+            run.font.color.rgb = RGBColor(0x1E, 0x3A, 0x5F)
+
+        # 正文段落
+        for line in text.split("\n"):
             stripped = line.strip()
             if not stripped:
                 continue
-            # 检测列表项（以 -/•/数字. 开头）
             if _is_list_item(stripped):
                 p = doc.add_paragraph(stripped, style="List Bullet")
             else:
                 p = doc.add_paragraph(stripped)
             for run in p.runs:
                 run.font.size = Pt(11)
+                run.font.color.rgb = body_font
+
+    # --- 空内容兜底 ---
+    if not content_written:
+        doc.add_heading("文档说明", level=1)
+        fallback = doc.add_paragraph(
+            "本次对话暂无可导出的内容。请在对话框中发送消息后再尝试导出。"
+        )
+        for run in fallback.runs:
+            run.font.size = Pt(12)
+            run.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
 
     # --- 结尾 ---
     doc.add_paragraph()
@@ -684,12 +705,12 @@ def _is_list_item(text: str) -> bool:
     return bool(re.match(r'^[-*•]|\d+[.)、]', text))
 
 
-def _modify_pptx(pptx_bytes: bytes, patch_ops: list[dict]) -> bytes | None:
-    """使用 hands-on-deck (deck.py) 修改 PPT。
+def _modify_pptx(pptx_bytes: bytes, patch_ops: list[dict],
+                 client=None, model_name=None, instruction: str = "") -> bytes | None:
+    """两阶段 PPT 修改：hands-on-deck 结构 + python-pptx 填充新空白页。
 
-    patch_ops 格式：[{"op": "replace-text", "scope": "deck", "from": "旧", "to": "新"}, ...]
-    支持的 op：replace-text, replace-color, set-text, delete, duplicate, move, resize,
-              set-style, add-shape, add-picture, add-table, add-slide, set-notes, set-props 等
+    Phase 1: hands-on-deck 处理结构变更（增/删/复制幻灯片、替换已有文本）
+    Phase 2: python-pptx 检测新增空白页，用 LLM 生成内容填充
     """
     hod_dir = BASE_DIR / "hands_on_deck"
     deck_py = hod_dir / "scripts_deck.py"
@@ -710,9 +731,16 @@ def _modify_pptx(pptx_bytes: bytes, patch_ops: list[dict]) -> bytes | None:
              str(patch_path), "-o", str(output_path), "--fix"],
             capture_output=True, text=True, cwd=str(hod_dir), timeout=120
         )
-        if result.returncode == 0 and output_path.exists():
-            return output_path.read_bytes()
-        return None
+        if result.returncode != 0 or not output_path.exists():
+            return None
+
+        modified_bytes = output_path.read_bytes()
+
+        # Phase 2: 检测并填充新增空白页
+        if client and model_name and instruction:
+            modified_bytes = _post_process_new_slides(modified_bytes, client, model_name, instruction)
+
+        return modified_bytes
 
 
 def _instruction_to_patch(client, model_name, instruction: str) -> list | None:
@@ -723,10 +751,14 @@ def _instruction_to_patch(client, model_name, instruction: str) -> list | None:
 - replace-text: 替换文本  {{"op":"replace-text","scope":"deck"|"slide:N"|"shape:NAME","from":"原文本","to":"新文本"}}
 - delete: 删除形状       {{"op":"delete","scope":"slide:N","shape_idx":0}}
 - duplicate: 复制形状    {{"op":"duplicate","scope":"slide:N","shape_idx":0}}
-- set-text: 设置文本     {{"op":"set-text","scope":"shape:NAME","text":"新内容"}}
-- resize: 调整大小       {{"op":"resize","scope":"shape:NAME","width":300,"height":150}}
-- add-slide: 添加幻灯片  {{"op":"add-slide","idx":-1,"layout_idx":1}}
+- add-slide: 添加幻灯片  {{"op":"add-slide","idx":-1,"layout_idx":1}}  — 注意：此操作只创建空白页，内容会由后续步骤填充
 - set-notes: 设置备注    {{"op":"set-notes","scope":"slide:N","text":"备注内容"}}
+
+重要规则：
+1. 当用户要求"添加新页"时，使用 add-slide 操作（内容填充由系统后续处理）
+2. 当用户要求"修改/替换已有文本"时，使用 replace-text 操作
+3. 不要尝试用 set-text/add-shape 在新页上设置内容 — 因为新页的形状名称不可预测
+4. 用户指令中提到的"增加几页/添加内容页/新增总结页"等，都用 add-slide 操作
 
 用户指令：{instruction}
 
@@ -746,6 +778,171 @@ def _instruction_to_patch(client, model_name, instruction: str) -> list | None:
         return None
     except Exception:
         return None
+
+
+def _post_process_new_slides(pptx_bytes: bytes, client, model_name, instruction: str) -> bytes:
+    """Phase 2: 检测 PPT 中的空白新页，用 LLM 生成内容填充。
+
+    判定"空白页"的标准：有标题占位符但标题为空，或正文占位符无实际文本。
+    """
+    from pptx import Presentation
+    from pptx.util import Inches, Pt, Emu
+    from pptx.enum.text import PP_ALIGN
+
+    prs = Presentation(io.BytesIO(pptx_bytes))
+    slide_count = len(prs.slides)
+
+    # 找出空白页的索引（相对于原始文件，add-slide 追加的是最后几页）
+    blank_indices = []
+    for i, slide in enumerate(prs.slides):
+        if _is_slide_blank(slide):
+            blank_indices.append(i)
+
+    if not blank_indices:
+        return pptx_bytes
+
+    # 用 LLM 为每个空白页生成内容
+    for idx in blank_indices:
+        slide = prs.slides[idx]
+        content = _llm_generate_slide_content(client, model_name, instruction, idx + 1, len(blank_indices))
+        _fill_slide_content(slide, content)
+
+    buf = io.BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
+
+
+def _is_slide_blank(slide) -> bool:
+    """判断幻灯片是否为空白（只有版式框架，无实质内容）。"""
+    has_text = False
+    for shape in slide.shapes:
+        if shape.has_text_frame:
+            text = shape.text_frame.text.strip()
+            if text and len(text) > 1:
+                has_text = True
+                break
+    return not has_text
+
+
+def _llm_generate_slide_content(client, model_name, instruction: str,
+                                 slide_num: int, total_new: int) -> dict:
+    """为单个空白页生成标题和内容。"""
+    prompt = f"""你是 PPT 内容撰写专家。根据用户的修改指令，为第 {slide_num}/{total_new} 页生成 PPT 内容。
+
+用户指令：{instruction}
+
+请返回 JSON 格式：
+{{"title": "页面标题", "subtitle": "副标题（可选，无则省略）", "bullets": ["要点1", "要点2", "要点3"]}}
+
+- title: 5-15 字的简洁标题
+- bullets: 3-6 个要点，每个 15-40 字
+- 如果是总结/结束页，title 可用"总结"、"Thanks"等，bullets 可省略
+
+返回纯 JSON，不要解释。"""
+
+    try:
+        resp = client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+        )
+        raw = resp.choices[0].message.content.strip()
+        raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        return json.loads(raw)
+    except Exception:
+        return {"title": f"新增页面 {slide_num}", "bullets": ["内容待补充"]}
+
+
+def _fill_slide_content(slide, content: dict):
+    """用 python-pptx 将内容填充到幻灯片。
+
+    优先使用占位符（placeholder），否则创建文本框。
+    """
+    from pptx.util import Inches, Pt, Emu
+    from pptx.enum.text import PP_ALIGN
+
+    title_text = content.get("title", "")
+    bullets = content.get("bullets", [])
+    subtitle = content.get("subtitle", "")
+
+    # 查找标题占位符
+    title_ph = None
+    body_ph = None
+    for shape in slide.placeholders:
+        if shape.placeholder_format.idx == 0:  # 标题占位符
+            title_ph = shape
+        elif shape.placeholder_format.idx == 1:  # 正文占位符
+            body_ph = shape
+
+    # 填充标题
+    if title_ph is not None:
+        tf = title_ph.text_frame
+        tf.clear()
+        p = tf.paragraphs[0]
+        run = p.add_run()
+        run.text = title_text
+        run.font.size = Pt(36)
+        run.font.bold = True
+    else:
+        # 新建标题文本框
+        left = Emu(0x0F000000)  # ~2.54cm
+        top = Emu(0x0F000000)   # ~2.54cm
+        width = Emu(0x08000000)
+        height = Emu(0x01500000)
+        txBox = slide.shapes.add_textbox(left, top, width, height)
+        tf = txBox.text_frame
+        tf.word_wrap = True
+        p = tf.paragraphs[0]
+        run = p.add_run()
+        run.text = title_text
+        run.font.size = Pt(36)
+        run.font.bold = True
+
+    # 填充副标题
+    if subtitle:
+        left = Emu(0x0F000000)
+        top = Emu(0x02800000)
+        width = Emu(0x08000000)
+        height = Emu(0x00800000)
+        txBox = slide.shapes.add_textbox(left, top, width, height)
+        tf = txBox.text_frame
+        p = tf.paragraphs[0]
+        run = p.add_run()
+        run.text = subtitle
+        run.font.size = Pt(20)
+        run.font.italic = True
+
+    # 填充正文要点
+    if bullets:
+        if body_ph is not None:
+            tf = body_ph.text_frame
+            tf.clear()
+            for i, bullet in enumerate(bullets):
+                if i == 0:
+                    p = tf.paragraphs[0]
+                else:
+                    p = tf.add_paragraph()
+                run = p.add_run()
+                run.text = f"• {bullet}"
+                run.font.size = Pt(18)
+        else:
+            # 新建正文文本框
+            left = Emu(0x0F000000)
+            top = Emu(0x03800000)
+            width = Emu(0x08000000)
+            height = Emu(0x05000000)
+            txBox = slide.shapes.add_textbox(left, top, width, height)
+            tf = txBox.text_frame
+            tf.word_wrap = True
+            for i, bullet in enumerate(bullets):
+                if i == 0:
+                    p = tf.paragraphs[0]
+                else:
+                    p = tf.add_paragraph()
+                run = p.add_run()
+                run.text = f"• {bullet}"
+                run.font.size = Pt(18)
+                p.space_after = Pt(12)
 
 
 def _modify_docx(docx_bytes: bytes, instruction: str, client=None, model_name=None) -> bytes | None:
@@ -1141,10 +1338,12 @@ if edit_toggle:
 
         if decision.route == "edit_ppt" and edit_instruction and client is not None:
             if st.button("🚀 执行 PPT 修改", key="exec_edit_ppt"):
-                with st.spinner("🔧 正在生成 patch 并应用到 PPT…"):
+                with st.spinner("🔧 正在生成 patch 并应用到 PPT（约 10~60 秒）…"):
                     patch = _instruction_to_patch(client, model_name, edit_instruction)
                     if patch:
-                        result = _modify_pptx(file_bytes, patch)
+                        result = _modify_pptx(file_bytes, patch,
+                                               client=client, model_name=model_name,
+                                               instruction=edit_instruction)
                         if result:
                             st.session_state.edited_bytes = result
                             st.session_state.edited_name = f"edited_{edit_file.name}"
