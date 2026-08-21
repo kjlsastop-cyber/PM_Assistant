@@ -58,6 +58,39 @@ div[data-testid="stChatInputFileUploadButton"] button::before {
 
 /* 按钮样式已按 kind 区分，见下方话题列表按钮样式 */
 
+/* ========== 侧边栏字号统一：同类元素同一字号 ========== */
+
+/* 助手名（st.title）：侧边栏主标题 */
+section[data-testid="stSidebar"] h1 {
+    font-size: 20px !important;
+    line-height: 1.4 !important;
+    margin: 6px 0 10px !important;
+}
+
+/* 分区小标题（st.subheader：历史对话/自我审查/知识库）：统一同一字号 */
+section[data-testid="stSidebar"] h2,
+section[data-testid="stSidebar"] h3 {
+    font-size: 15px !important;
+    font-weight: 700 !important;
+    line-height: 1.4 !important;
+    margin: 14px 0 8px !important;
+    color: #33383f !important;
+}
+
+/* 表单标签（当前助手/当前大模型/启用回复审查/上传框）：统一字号 */
+section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {
+    font-size: 13px !important;
+    font-weight: 600 !important;
+    color: #33383f !important;
+}
+
+/* 说明文字（st.caption：模型信息/知识库统计等）：统一小字号 */
+section[data-testid="stSidebar"] [data-testid="stCaptionContainer"],
+section[data-testid="stSidebar"] p.caption {
+    font-size: 12px !important;
+    color: #8a7a5f !important;
+}
+
 /* 上传区：发卡蓝虚线圆角 */
 div[data-testid="stFileUploadDropzone"] {
     border: 2px dashed #7fb8dd !important;
@@ -182,7 +215,7 @@ div[data-testid="stSelectbox"] > div {
     font-weight: 600 !important;
     border-radius: 0 !important;
     padding: 4px 2px !important;
-    font-size: 14px !important;
+    font-size: 13px !important;
 }
 .stButton > button[kind="tertiary"]:hover {
     background: transparent !important;
