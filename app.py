@@ -715,6 +715,174 @@ def _modify_pptx(pptx_bytes: bytes, patch_ops: list[dict]) -> bytes | None:
         return None
 
 
+def _instruction_to_patch(client, model_name, instruction: str) -> list | None:
+    """将自然语言修改指令转换为 hands-on-deck patch 格式。"""
+    prompt = f"""你是 PPT 编辑专家。将用户的修改指令转换为 hands-on-deck patch JSON 数组。
+
+支持的 patch 操作（op 字段）：
+- replace-text: 替换文本  {{"op":"replace-text","scope":"deck"|"slide:N"|"shape:NAME","from":"原文本","to":"新文本"}}
+- delete: 删除形状       {{"op":"delete","scope":"slide:N","shape_idx":0}}
+- duplicate: 复制形状    {{"op":"duplicate","scope":"slide:N","shape_idx":0}}
+- set-text: 设置文本     {{"op":"set-text","scope":"shape:NAME","text":"新内容"}}
+- resize: 调整大小       {{"op":"resize","scope":"shape:NAME","width":300,"height":150}}
+- add-slide: 添加幻灯片  {{"op":"add-slide","idx":-1,"layout_idx":1}}
+- set-notes: 设置备注    {{"op":"set-notes","scope":"slide:N","text":"备注内容"}}
+
+用户指令：{instruction}
+
+请返回纯 JSON 数组，不要添加任何解释文字。如果无法理解指令，返回空数组 []。"""
+
+    try:
+        resp = client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+        )
+        raw = resp.choices[0].message.content.strip()
+        raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        patch = json.loads(raw)
+        if isinstance(patch, list) and len(patch) > 0:
+            return patch
+        return None
+    except Exception:
+        return None
+
+
+def _modify_docx(docx_bytes: bytes, instruction: str, client=None, model_name=None) -> bytes | None:
+    """使用 python-docx 增量编辑 DOCX（文本替换、段落删除、追加等）。"""
+    try:
+        from docx import Document
+
+        doc = Document(io.BytesIO(docx_bytes))
+
+        if client and model_name:
+            ops = _llm_docx_instruction(client, model_name, instruction)
+        else:
+            ops = _parse_docx_instruction(instruction)
+
+        for op in ops:
+            if op["op"] == "replace":
+                _docx_replace_text(doc, op["from"], op["to"])
+            elif op["op"] == "delete_paragraph":
+                _docx_delete_paragraphs(doc, op.get("keyword", ""))
+            elif op["op"] == "append":
+                style = op.get("style", "")
+                p = doc.add_paragraph(op.get("text", ""))
+                if style:
+                    try:
+                        p.style = doc.styles[style]
+                    except Exception:
+                        pass
+            elif op["op"] == "insert_after":
+                _docx_insert_after(doc, op.get("keyword", ""), op.get("text", ""))
+
+        buf = io.BytesIO()
+        doc.save(buf)
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
+def _llm_docx_instruction(client, model_name, instruction: str) -> list:
+    """用 LLM 将自然语言指令解析为 DOCX 操作列表。"""
+    prompt = f"""你是 Word 文档编辑专家。将用户的修改指令转换为 JSON 操作数组。
+
+支持的操作：
+- {{"op":"replace","from":"原文本","to":"新文本"}}  — 全文替换文本
+- {{"op":"delete_paragraph","keyword":"关键词"}}    — 删除包含关键词的段落
+- {{"op":"append","text":"追加内容","style":"Normal"}}  — 在文档末尾追加段落
+- {{"op":"insert_after","keyword":"锚点","text":"插入内容"}} — 在包含关键词的段落后插入新段落
+
+用户指令：{instruction}
+
+返回纯 JSON 数组，不要任何解释。"""
+    try:
+        resp = client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+        )
+        raw = resp.choices[0].message.content.strip()
+        raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        ops = json.loads(raw)
+        if isinstance(ops, list):
+            return ops
+    except Exception:
+        pass
+    return _parse_docx_instruction(instruction)
+
+
+def _parse_docx_instruction(instruction: str) -> list:
+    """正则兜底解析 DOCX 指令。"""
+    ops = []
+    import re
+
+    for m in re.finditer(r'(?:把|将)(.+?)(?:改成|替换为|换成|改为)(.+?)(?=[，,。；;]|$)', instruction):
+        ops.append({"op": "replace", "from": m.group(1).strip().strip('"“”'), "to": m.group(2).strip().strip('"“”')})
+
+    for m in re.finditer(r'删除(?:包含|含有|关于)?(.+?)(?:的|之)?段落', instruction):
+        ops.append({"op": "delete_paragraph", "keyword": m.group(1).strip()})
+
+    for m in re.finditer(r'(?:在末尾|最后|追加|添加)(.+?)(?:内容|段落|文字)', instruction):
+        ops.append({"op": "append", "text": m.group(1).strip()})
+
+    return ops
+
+
+def _docx_insert_after(doc, keyword: str, text: str):
+    """在包含关键词的段落后插入新段落。"""
+    for i, para in enumerate(doc.paragraphs):
+        if keyword in para.text:
+            new_p = para._element.makeelement(para._element.tag, para._element.attrib)
+            for run in para.runs:
+                new_run = new_p.makeelement(run._element.tag, run._element.attrib)
+                new_run.text = ""
+                new_p.append(new_run)
+            para._element.addnext(new_p)
+            from docx.oxml.ns import qn
+            for r in new_p.findall(qn("w:r")):
+                new_t = r.makeelement(qn("w:t"), {})
+                new_t.text = text
+                r.append(new_t)
+            break
+
+
+def _docx_replace_text(doc, old: str, new: str):
+    """在 DOCX 所有段落和表格中替换文本。"""
+    for para in doc.paragraphs:
+        _replace_in_paragraph(para, old, new)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    _replace_in_paragraph(para, old, new)
+
+
+def _replace_in_paragraph(para, old: str, new: str):
+    """在段落中替换文本（跨 run 处理）。"""
+    full = "".join(run.text for run in para.runs)
+    if old not in full:
+        return
+    new_text = full.replace(old, new)
+    if para.runs:
+        para.runs[0].text = new_text
+        for run in para.runs[1:]:
+            run.text = ""
+
+
+def _docx_delete_paragraphs(doc, keyword: str):
+    """删除包含关键词的段落。"""
+    if not keyword:
+        return
+    to_remove = []
+    for i, para in enumerate(doc.paragraphs):
+        if keyword in para.text:
+            to_remove.append(para)
+    for para in to_remove:
+        p = para._element
+        p.getparent().remove(p)
+
+
 def _autodownload(ext: str):
     """注入 JS 自动触发一次下载点击，实现“生成完直接下载”。"""
     import streamlit.components.v1 as components
@@ -923,7 +1091,7 @@ last_reply = next(
     None,
 )
 has_content = any(not m.get("greeting") for m in messages)
-_t1, _t2, _t3 = st.columns([3, 1, 1])
+_t1, _t2, _t3, _t4 = st.columns([2, 1, 1, 1])
 with _t2:
     ppt_btn = st.button(
         "📊 生成 PPT",
@@ -932,22 +1100,96 @@ with _t2:
     )
 with _t3:
     doc_btn = st.button(
-        "📤 导出对话",
+        "📤 导出 Word",
         disabled=not has_content,
         help="把当前话题完整导出为 Word 文档",
     )
+with _t4:
+    edit_toggle = st.toggle("🛠️ 编辑模式", help="上传已有 PPT/DOCX 进行增量编辑")
 
-if ppt_btn and last_reply is not None and client is not None:
-    with st.spinner("📊 正在分析内容并排版 PPT（约 10~30 秒）…"):
-        src = last_reply.get("content") or last_reply.get("display") or ""
-        outline = _ppt_outline(client, model_name, src) or _fallback_outline(src)
-        st.session_state.ppt_bytes = _build_pptx(outline, cur["title"])
-        st.session_state.ppt_autodl = True
+# ---------- 编辑模式：上传 + patch ----------
+if edit_toggle:
+    st.info("**编辑模式已启用**：上传已有 PPT/DOCX 文件，通过 AI 生成 patch 指令进行增量编辑（永远输出副本，不会覆盖源文件）")
+    edit_col1, edit_col2 = st.columns([1, 1])
+    with edit_col1:
+        edit_file = st.file_uploader(
+            "📎 上传要编辑的 PPT/DOCX",
+            type=["pptx", "docx"],
+            key="edit_target",
+            help="上传后，助手会读取文件，你可以用自然语言描述修改需求",
+        )
+    with edit_col2:
+        edit_instruction = st.text_area(
+            "✏️ 修改指令",
+            placeholder="例如：把第 3 页的「营销场景」改成「武警舆情」，在最后添加一页结束页",
+            key="edit_instr",
+            height=80,
+        )
 
-if doc_btn and has_content:
-    with st.spinner("📤 正在生成 Word 文档…"):
-        st.session_state.docx_bytes = _build_docx(cur["title"], messages)
-        st.session_state.docx_autodl = True
+    if edit_file is not None:
+        file_bytes = edit_file.read()
+        decision = detect_route("upload_file", edit_file.name, file_bytes)
+
+        for w in decision.warnings:
+            st.warning(w)
+        for bw in decision.boundary_warnings:
+            st.warning(bw)
+        if not decision.boundary_warnings:
+            st.caption("✅ 文件检测：未发现 SmartArt/动画/修订标记等复杂元素")
+
+        st.caption(f"🔀 路由决策：**{decision.route}** | 安全模式：**{decision.safety['output_mode']}**")
+
+        if decision.route == "edit_ppt" and edit_instruction and client is not None:
+            if st.button("🚀 执行 PPT 修改", key="exec_edit_ppt"):
+                with st.spinner("🔧 正在生成 patch 并应用到 PPT…"):
+                    patch = _instruction_to_patch(client, model_name, edit_instruction)
+                    if patch:
+                        result = _modify_pptx(file_bytes, patch)
+                        if result:
+                            st.session_state.edited_bytes = result
+                            st.session_state.edited_name = f"edited_{edit_file.name}"
+                            st.success(f"✅ 修改成功！输出 {len(result)} bytes 副本")
+                        else:
+                            st.error("❌ hands-on-deck 执行失败，请检查 patch 格式")
+                    else:
+                        st.error("❌ 无法生成 patch 指令，请简化修改描述")
+
+        elif decision.route == "edit_docx":
+            st.info("📝 DOCX 编辑链路：使用 python-docx 进行增量修改（支持文本替换、段落增删、追加等）")
+            if edit_instruction and st.button("🚀 执行 DOCX 修改", key="exec_edit_docx"):
+                with st.spinner("🔧 正在修改 DOCX…"):
+                    edited = _modify_docx(file_bytes, edit_instruction, client=client, model_name=model_name)
+                    if edited:
+                        st.session_state.edited_bytes = edited
+                        st.session_state.edited_name = f"edited_{edit_file.name}"
+                        st.success(f"✅ 修改成功！输出 {len(edited)} bytes 副本")
+                    else:
+                        st.error("❌ DOCX 修改失败")
+
+    if st.session_state.get("edited_bytes"):
+        st.download_button(
+            "⬇️ 下载编辑后的文件",
+            data=st.session_state["edited_bytes"],
+            file_name=st.session_state.get("edited_name", "edited_output.bin"),
+            mime="application/octet-stream",
+            key="edited_dl",
+        )
+
+# ---------- 生成模式 ----------
+if not edit_toggle:
+    if ppt_btn and last_reply is not None and client is not None:
+        with st.spinner("📊 正在分析内容并排版 PPT（约 10~30 秒）…"):
+            src = last_reply.get("content") or last_reply.get("display") or ""
+            decision = detect_route("ppt_outline", content_bytes=None)
+            outline = _ppt_outline(client, model_name, src) or _fallback_outline(src)
+            st.session_state.ppt_bytes = _build_pptx(outline, cur["title"])
+            st.session_state.ppt_autodl = True
+
+    if doc_btn and has_content:
+        with st.spinner("📤 正在生成 Word 文档…"):
+            decision = detect_route("docx_outline", content_bytes=None)
+            st.session_state.docx_bytes = _build_docx(cur["title"], messages)
+            st.session_state.docx_autodl = True
 
 if st.session_state.get("ppt_bytes"):
     st.download_button(
