@@ -548,7 +548,7 @@ with st.sidebar:
         st.caption(f"当前模型：{model_name}")
     else:
         client = None
-        st.error("未配置任何大模型密钥，请编辑 .env 文件后刷新页面。")
+        st.error("未配置任何大模型密钥：本地请编辑 .env；Streamlit Cloud 请在 Settings → Secrets 中配置后重启应用。")
 
     st.subheader("Agent 自我审查")
     review_enabled = st.toggle(
@@ -563,7 +563,7 @@ with st.sidebar:
     st.subheader("知识库（智能检索）")
     embedding_ready = kb.get_embedding_client() is not None
     if not embedding_ready:
-        st.warning("未配置向量化服务（.env 中的 EMBEDDING_* 配置项），知识库暂不可用。")
+        st.warning("未配置向量化服务（EMBEDDING_* 配置项：本地在 .env，线上在 Settings → Secrets），知识库暂不可用。")
 
     kb_files = st.file_uploader(
         "拖入或点击上传文档入库（txt/md/pdf/docx/pptx/xlsx，可多选）",
@@ -679,7 +679,7 @@ if submission and ((submission.text or "").strip() or submission.files):
         user_input = "请结合我上传的附件内容进行回答。"
 
     if client is None:
-        st.error("请先在 .env 中配置大模型密钥（OPENAI_API_KEY 或 EMBEDDING_API_KEY）。")
+        st.error("请先配置大模型密钥（OPENAI_API_KEY 或 EMBEDDING_API_KEY）：本地编辑 .env，线上在 Settings → Secrets。")
         st.stop()
 
     # 1) 本次附件文本（多文件拼接）
@@ -721,16 +721,16 @@ if submission and ((submission.text or "").strip() or submission.files):
     ]
     api_content = "\n\n".join(parts)
 
-    # 4) 上下文截断：发送给模型的历史对话（开场白仅展示，不进上下文）
-    messages_for_api = _truncate_history(
-        [{"role": "system", "content": SYSTEM_PROMPT}]
-        + [m for m in messages if not m.get("greeting")]
-    )
-
+    # 4) 先把本次用户消息写入会话，再组装发送给模型的消息（开场白仅展示，不进上下文）
     display = user_input
     if chat_files:
         display += "\n\n📎 " + "、".join(f.name for f in chat_files)
     messages.append({"role": "user", "display": display, "content": api_content})
+
+    messages_for_api = _truncate_history(
+        [{"role": "system", "content": SYSTEM_PROMPT}]
+        + [m for m in messages if not m.get("greeting")]
+    )
     title_changed = False
     if sum(1 for m in messages if m["role"] == "user") == 1:  # 首条提问自动作为话题标题
         cur["title"] = user_input.replace("\n", " ")[:18]
