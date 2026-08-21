@@ -271,12 +271,15 @@ def _extract_greeting(prompt_text: str) -> tuple[str, str]:
 
 
 def _ppt_outline(client, model_name: str, content: str) -> dict | None:
-    """调用模型把内容提炼为 PPT 页面大纲（JSON），失败返回 None。"""
+    """调用模型把内容提炼为 PPT 页面大纲（JSON，含 layout 类型），失败返回 None。"""
     system = (
         "你是资深演示设计顾问。将用户内容改写为适合演示的 PPT 大纲，只输出纯 JSON，"
         "不要 markdown 代码块或其他任何文字。格式：\n"
-        '{"title":"演示标题","slides":[{"title":"页标题","bullets":["要点1","要点2"],'
-        '"notes":"演讲备注"}]}\n'
+        '{"title":"演示标题","slides":[{"type":"content","title":"页标题",'
+        '"bullets":["要点1","要点2"],"notes":"演讲备注"}]}\n'
+        "type 可选值：cover(封面), section(章节分隔), content(内容页), closing(结尾)。"
+        "第一页自动视为 cover，最后一页自动视为 closing。"
+        "中间页：章节大标题用 section，其余用 content。"
         "要求：总页数控制在 5~10 页；每页要点 3~5 条，每条不超过 30 字，"
         "提炼为观点式短句而非原文照搬；notes 为该页演讲提示，不超过 60 字。"
     )
@@ -325,17 +328,160 @@ def _fallback_outline(content: str) -> dict:
     return {"title": title or "演示文稿", "slides": slides[:10]}
 
 
+_TEMPLATE_CACHE: dict[str, bytes] = {}
+
+
+def _get_template_bytes() -> bytes | None:
+    """加载 PPT 模板文件，支持用户上传（st.session_state.ppt_template）或默认模板。"""
+    key = st.session_state.get("_ppt_template_key", "default")
+    if key in _TEMPLATE_CACHE:
+        return _TEMPLATE_CACHE[key]
+    # 优先使用用户上传的 me.pptx，其次是默认模板
+    for name in ("me.pptx", "ppt_template.pptx"):
+        tmpl_path = BASE_DIR / "assets" / name
+        if tmpl_path.exists():
+            data = tmpl_path.read_bytes()
+            _TEMPLATE_CACHE[key] = data
+            return data
+    return None
+
+
+def _fill_placeholder(ph, text: str):
+    """向占位符写入文本，保留模板原有样式（字体/字号/颜色）。"""
+    tf = ph.text_frame
+    tf.word_wrap = True
+    # 清空现有文本再写入
+    tf.clear()
+    p = tf.paragraphs[0]
+    p.text = text
+    for run in p.runs:
+        run.font.name = "微软雅黑"
+
+
+def _fill_body_placeholder(ph, bullets: list[str]):
+    """向 body 占位符写入多条要点，保留模板样式并添加项目符号。"""
+    from pptx.oxml.ns import qn
+    from lxml import etree
+
+    tf = ph.text_frame
+    tf.word_wrap = True
+    tf.clear()
+    for i, bullet in enumerate(bullets):
+        p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+        p.text = bullet
+        # 添加项目符号（buFont + buChar）
+        pPr = p._pPr
+        if pPr is None:
+            pPr = etree.SubElement(p._p, qn('a:pPr'))
+        buChar = etree.SubElement(pPr, qn('a:buChar'), char='•')
+        for run in p.runs:
+            run.font.name = "微软雅黑"
+
+
 def _build_pptx(outline: dict, source_title: str = "") -> bytes:
-    """按大纲生成奶油企鹅风 16:9 PPT，返回 .pptx 文件字节。"""
+    """按大纲生成 PPT。优先使用模板（带占位符），失败时回退到空白画布。"""
+    template_bytes = _get_template_bytes()
+    if template_bytes is not None:
+        return _build_pptx_from_template(outline, source_title, template_bytes)
+    return _build_pptx_fallback(outline, source_title)
+
+
+def _remove_slide(prs, slide_idx: int):
+    """从演示文稿中删除指定索引的幻灯片。"""
+    xml_slides = prs.slides._sldIdLst
+    rels = prs.part.rels
+    sldId = xml_slides[slide_idx]
+    rId = sldId.rId
+    xml_slides.remove(sldId)
+    try:
+        prs.part.drop_rel(rId)
+    except Exception:
+        pass
+
+
+def _build_pptx_from_template(outline: dict, source_title: str, template_bytes: bytes) -> bytes:
+    """基于模板生成 PPT：清空模板示例页 → 按版式选择布局 → 填充占位符。"""
+    from pptx import Presentation
+
+    prs = Presentation(io.BytesIO(template_bytes))
+
+    # 清空模板中的示例幻灯片（倒序删除，避免索引偏移）
+    for i in range(len(prs.slides) - 1, -1, -1):
+        _remove_slide(prs, i)
+
+    layouts = prs.slide_layouts
+    LAYOUT_COVER = layouts[0] if len(layouts) > 0 else layouts[6]
+    LAYOUT_CONTENT = layouts[1] if len(layouts) > 1 else layouts[6]
+    LAYOUT_SECTION = layouts[2] if len(layouts) > 2 else layouts[1]
+    LAYOUT_CLOSING = layouts[0] if len(layouts) > 0 else layouts[6]
+
+    slides_data = outline.get("slides", [])
+    title = str(outline.get("title") or source_title or "演示文稿").strip()
+
+    # 1) 封面
+    cover = prs.slides.add_slide(LAYOUT_COVER)
+    for ph in cover.placeholders:
+        idx = ph.placeholder_format.idx
+        if idx == 0:
+            _fill_placeholder(ph, title)
+        elif idx == 1:
+            _fill_placeholder(ph, "🐧 由咕咕嘎嘎助手生成")
+
+    # 2) 章节页 + 内容页
+    for i, s in enumerate(slides_data):
+        s_type = str(s.get("type") or "content").strip().lower()
+        s_title = str(s.get("title") or "").strip()
+        bullets = [str(b).strip() for b in (s.get("bullets") or []) if str(b).strip()][:6]
+
+        if s_type in ("section", "divider", "chapter"):
+            slide = prs.slides.add_slide(LAYOUT_SECTION)
+            for ph in slide.placeholders:
+                idx = ph.placeholder_format.idx
+                if idx == 0:
+                    _fill_placeholder(ph, s_title)
+                elif idx == 1:
+                    desc = str(s.get("description") or s.get("notes") or "").strip()
+                    _fill_placeholder(ph, desc)
+        else:
+            slide = prs.slides.add_slide(LAYOUT_CONTENT)
+            for ph in slide.placeholders:
+                idx = ph.placeholder_format.idx
+                if idx == 0:
+                    _fill_placeholder(ph, s_title)
+                elif idx == 1:
+                    _fill_body_placeholder(ph, bullets)
+            notes = str(s.get("notes") or "").strip()
+            if notes:
+                try:
+                    slide.notes_slide.notes_text_frame.text = notes
+                except Exception:
+                    pass
+
+    # 3) 结尾页
+    closing = prs.slides.add_slide(LAYOUT_CLOSING)
+    for ph in closing.placeholders:
+        idx = ph.placeholder_format.idx
+        if idx == 0:
+            _fill_placeholder(ph, "感谢聆听")
+        elif idx == 1:
+            _fill_placeholder(ph, "THANK YOU")
+
+    buf = io.BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
+
+
+def _build_pptx_fallback(outline: dict, source_title: str = "") -> bytes:
+    """兜底：在空白画布上硬画（模板不可用时）。"""
     from pptx import Presentation
     from pptx.dml.color import RGBColor
     from pptx.enum.shapes import MSO_SHAPE
     from pptx.util import Inches, Pt
 
-    BG = RGBColor(0xFD, 0xF6, 0xEC)      # 奶油底
-    ACCENT = RGBColor(0xF2, 0xB9, 0x5C)  # 企鹅橙
-    DARK = RGBColor(0x33, 0x38, 0x3F)    # 深灰正文
-    GRAY = RGBColor(0x8A, 0x7A, 0x5F)    # 暖灰辅助
+    BG = RGBColor(0xFD, 0xF6, 0xEC)
+    ACCENT = RGBColor(0xF2, 0xB9, 0x5C)
+    DARK = RGBColor(0x33, 0x38, 0x3F)
+    GRAY = RGBColor(0x8A, 0x7A, 0x5F)
 
     prs = Presentation()
     prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5)
@@ -347,20 +493,19 @@ def _build_pptx(outline: dict, source_title: str = "") -> bytes:
         s.background.fill.fore_color.rgb = BG
         return s
 
-    # 封面
+    title = str(outline.get("title") or source_title or "演示文稿").strip()
     cover = _new_slide()
     tb = cover.shapes.add_textbox(Inches(1.2), Inches(2.7), Inches(10.9), Inches(1.6))
     tf = tb.text_frame
     tf.word_wrap = True
     p = tf.paragraphs[0]
-    p.text = str(outline.get("title") or source_title or "演示文稿").strip()
+    p.text = title
     p.font.size, p.font.bold, p.font.color.rgb = Pt(40), True, DARK
     sub = cover.shapes.add_textbox(Inches(1.25), Inches(4.4), Inches(10.9), Inches(0.6))
     sp = sub.text_frame.paragraphs[0]
     sp.text = "🐧 由咕咕嘎嘎助手生成"
     sp.font.size, sp.font.color.rgb = Pt(16), GRAY
 
-    # 内容页
     for i, s in enumerate(outline.get("slides", []), 1):
         slide = _new_slide()
         title_tb = slide.shapes.add_textbox(Inches(0.8), Inches(0.5), Inches(11.7), Inches(0.9))
@@ -559,6 +704,22 @@ with st.sidebar:
     if review_enabled:
         review_model_label = REVIEW_MODEL or "复用当前对话模型"
         st.caption(f"审查模型：{review_model_label} | 温度：{REVIEW_TEMP}")
+
+    st.subheader("PPT 模板")
+    tmpl = st.file_uploader(
+        "上传 .pptx 模板（可选，用于生成 PPT 时套用样式）",
+        type=["pptx"],
+        key="ppt_template_uploader",
+        help="模板需含标准占位符（标题/正文）。不上传则使用默认企鹅奶油风模板。",
+    )
+    if tmpl:
+        st.session_state["_ppt_template_key"] = f"user_{tmpl.size}_{tmpl.name}"
+        _TEMPLATE_CACHE[f"user_{tmpl.size}_{tmpl.name}"] = tmpl.read()
+        st.success(f"已加载模板：{tmpl.name}")
+    elif "_ppt_template_key" in st.session_state:
+        if st.button("清除自定义模板", key="clear_tmpl"):
+            del st.session_state["_ppt_template_key"]
+            st.rerun()
 
     st.subheader("知识库（智能检索）")
     embedding_ready = kb.get_embedding_client() is not None
