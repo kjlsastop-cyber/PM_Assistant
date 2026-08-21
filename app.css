@@ -1,0 +1,273 @@
+/* 助手工作台 - 咕咕嘎嘎可爱风主题 */
+
+.stApp, body {
+    background: linear-gradient(rgba(253, 246, 236, .38), rgba(253, 246, 236, .6)),
+        url("data:image/jpeg;base64,__PENGUIN_B64__") center / cover fixed no-repeat !important;
+}
+
+header[data-testid="stHeader"] { background: transparent !important; }
+footer { visibility: hidden; }
+
+/* 侧边栏：奶油毛玻璃 */
+section[data-testid="stSidebar"] {
+    background: rgba(255, 252, 246, .88) !important;
+    backdrop-filter: blur(12px);
+    border-right: 2px solid #fff;
+}
+
+/* 聊天气泡：奶油毛玻璃圆角卡片 */
+div[data-testid="stChatMessage"] {
+    background: rgba(255, 252, 246, .88) !important;
+    border: 2px solid #fff;
+    border-radius: 20px;
+    box-shadow: 0 4px 14px rgba(120, 100, 60, .18);
+    backdrop-filter: blur(8px);
+}
+
+div[data-testid="stChatMessageAvatar"] img {
+    border-radius: 50%;
+    border: 2px solid #fff;
+    box-shadow: 0 3px 8px rgba(120, 100, 60, .28);
+}
+
+/* 输入框：胶囊形 */
+div[data-testid="stChatInput"] {
+    border-radius: 999px !important;
+    border: 2px solid #fff !important;
+    background: rgba(255, 252, 246, .9) !important;
+    box-shadow: 0 8px 24px rgba(120, 100, 60, .25) !important;
+}
+
+div[data-testid="stChatInput"] textarea { background: transparent !important; }
+div[data-testid="stBottom"] > div { background: transparent !important; }
+
+/* 去掉内层嵌套容器的白底/边框，避免输入框看起来两层重叠 */
+div[data-testid="stChatInput"] > div {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+
+/* 附件按钮：默认"+"号换成曲别针图标 */
+div[data-testid="stChatInputFileUploadButton"] button svg { display: none !important; }
+div[data-testid="stChatInputFileUploadButton"] button::before {
+    content: "📎";
+    font-size: 18px;
+    line-height: 1;
+}
+
+/* 按钮样式已按 kind 区分，见下方话题列表按钮样式 */
+
+/* ========== 侧边栏字号统一：同类元素同一字号 ========== */
+
+/* 助手名（st.title）：侧边栏主标题 */
+section[data-testid="stSidebar"] h1 {
+    font-size: 20px !important;
+    line-height: 1.4 !important;
+    margin: 6px 0 10px !important;
+}
+
+/* 分区小标题（st.subheader：历史对话/自我审查/知识库）：统一同一字号 */
+section[data-testid="stSidebar"] h2,
+section[data-testid="stSidebar"] h3 {
+    font-size: 15px !important;
+    font-weight: 700 !important;
+    line-height: 1.4 !important;
+    margin: 14px 0 8px !important;
+    color: #33383f !important;
+}
+
+/* 表单标签（当前助手/当前大模型/启用回复审查/上传框）：统一字号 */
+section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {
+    font-size: 13px !important;
+    font-weight: 600 !important;
+    color: #33383f !important;
+}
+
+/* 说明文字（st.caption：模型信息/知识库统计等）：统一小字号 */
+section[data-testid="stSidebar"] [data-testid="stCaptionContainer"],
+section[data-testid="stSidebar"] p.caption {
+    font-size: 12px !important;
+    color: #8a7a5f !important;
+}
+
+/* 上传区：发卡蓝虚线圆角 */
+div[data-testid="stFileUploadDropzone"] {
+    border: 2px dashed #7fb8dd !important;
+    border-radius: 16px !important;
+    background: rgba(127, 184, 221, .14) !important;
+}
+
+/* 下拉框：圆角白底 */
+div[data-testid="stSelectbox"] > div {
+    border-radius: 14px !important;
+    border: 2px solid #f3e7d3 !important;
+    background: #fff !important;
+}
+
+/* 欢迎卡片 */
+.penguin-welcome {
+    display: flex;
+    gap: 18px;
+    align-items: center;
+    background: rgba(255, 252, 246, .88);
+    border: 2px solid #fff;
+    border-radius: 26px;
+    padding: 18px 24px;
+    margin: 4px 0 12px;
+    box-shadow: 0 8px 28px rgba(120, 100, 60, .22);
+    backdrop-filter: blur(12px);
+}
+
+.penguin-welcome img {
+    width: 92px;
+    height: 92px;
+    border-radius: 22px;
+    object-fit: cover;
+    border: 3px solid #fff;
+    box-shadow: 0 4px 12px rgba(242, 185, 92, .4);
+}
+
+.penguin-welcome h1 {
+    font-size: 20px;
+    margin: 0 0 6px;
+    color: #33383f;
+}
+
+.penguin-welcome p {
+    font-size: 13px;
+    color: #8a7a5f;
+    margin: 0;
+}
+
+/* 检索来源展示 */
+.retrieval-source {
+    background: rgba(127, 184, 221, .1);
+    border: 1px solid #7fb8dd;
+    border-radius: 10px;
+    padding: 8px 12px;
+    margin: 6px 0;
+    font-size: 13px;
+    color: #5a7a9a;
+}
+
+.retrieval-source summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: #3a5a7a;
+}
+
+.retrieval-source .source-item {
+    padding: 4px 0;
+    border-bottom: 1px dashed rgba(127, 184, 221, .3);
+}
+
+.retrieval-source .source-item:last-child {
+    border-bottom: none;
+}
+
+/* 话题重命名输入框 */
+.topic-rename input {
+    border-radius: 8px !important;
+    border: 2px solid #f3e7d3 !important;
+    background: #fff !important;
+}
+
+/* ========== 话题列表按钮样式 ========== */
+
+/* --- primary（激活话题）：深色胶囊 --- */
+.stButton > button[kind="primary"] {
+    background: #33383f !important;
+    color: #fff !important;
+    border: 1.5px solid #33383f !important;
+    border-radius: 12px !important;
+    font-weight: 600 !important;
+    font-size: 13px !important;
+    box-shadow: 0 2px 8px rgba(51, 56, 63, .25) !important;
+    padding: 6px 10px !important;
+}
+
+/* --- secondary 基础：奶油色圆角（用于未激活话题/图标按钮/新建话题） --- */
+.stButton > button[kind="secondary"] {
+    background: rgba(255, 252, 246, .9) !important;
+    color: #33383f !important;
+    border: 1.5px solid #f3e7d3 !important;
+    border-radius: 12px !important;
+    font-weight: 500 !important;
+    font-size: 13px !important;
+    box-shadow: 0 1px 3px rgba(120, 100, 60, .08) !important;
+    padding: 6px 10px !important;
+    text-align: left !important;
+    justify-content: flex-start !important;
+    transition: all .15s ease;
+}
+.stButton > button[kind="secondary"]:hover {
+    background: rgba(242, 185, 92, .2) !important;
+    border-color: #f2b95c !important;
+}
+
+/* --- tertiary 基础（新建话题 / ✓✕）：透明无框文字链接 --- */
+.stButton > button[kind="tertiary"] {
+    background: transparent !important;
+    color: #6b5a40 !important;
+    border: none !important;
+    box-shadow: none !important;
+    font-weight: 600 !important;
+    border-radius: 0 !important;
+    padding: 4px 2px !important;
+    font-size: 13px !important;
+}
+.stButton > button[kind="tertiary"]:hover {
+    background: transparent !important;
+    color: #f2b95c !important;
+}
+
+/* --- 图标按钮（tertiary 位于 stColumn 内）：小圆形浅色 --- */
+div[data-testid="stColumn"] .stButton > button[kind="tertiary"] {
+    width: 28px !important;
+    height: 28px !important;
+    min-width: 28px !important;
+    padding: 0 !important;
+    border-radius: 50% !important;
+    background: rgba(255, 252, 246, .95) !important;
+    color: #8a7a5f !important;
+    border: 1px solid #e8dcc8 !important;
+    font-size: 11px !important;
+    font-weight: 400 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    box-shadow: 0 1px 3px rgba(120, 100, 60, .1) !important;
+    transition: all .15s ease;
+}
+div[data-testid="stColumn"] .stButton > button[kind="tertiary"]:hover {
+    background: rgba(242, 185, 92, .3) !important;
+    color: #33383f !important;
+    border-color: #f2b95c !important;
+    transform: scale(1.08);
+}
+
+/* 表格样式 */
+.kb-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 8px 0;
+    font-size: 13px;
+}
+
+.kb-table th,
+.kb-table td {
+    border: 1px solid #e8dcc8;
+    padding: 6px 10px;
+    text-align: left;
+}
+
+.kb-table th {
+    background: rgba(255, 252, 246, .95);
+    font-weight: 600;
+    color: #33383f;
+}
+
+.kb-table tr:nth-child(even) {
+    background: rgba(255, 252, 246, .5);
+}

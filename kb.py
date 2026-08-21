@@ -18,8 +18,8 @@ from openai import OpenAI
 
 BASE_DIR = Path(__file__).parent
 
-CHUNK_SIZE = int(os.getenv("KB_CHUNK_SIZE", "500"))
-CHUNK_OVERLAP = int(os.getenv("KB_CHUNK_OVERLAP", "50"))
+CHUNK_SIZE = int(os.getenv("KB_CHUNK_SIZE", "700"))
+CHUNK_OVERLAP = int(os.getenv("KB_CHUNK_OVERLAP", "100"))
 TOP_K = int(os.getenv("KB_TOP_K", "4"))
 MIN_SCORE = float(os.getenv("KB_MIN_SCORE", "0.25"))
 EMBED_BATCH = int(os.getenv("EMBEDDING_BATCH_SIZE", "10"))
@@ -42,19 +42,149 @@ def get_embedding_model() -> str:
     return os.getenv("EMBEDDING_MODEL", "text-embedding-3-small").strip()
 
 
+# 标题行识别：Markdown #、整行加粗、第X章、一、二、（一）、1.1 / 1. 等短编号行。
+# 编号行限制内容长度并排除句读标点，避免把"1. 性能需求：……500ms。"这类列表项误判为标题。
+_HEADING_RE = re.compile(
+    r"^(?:"
+    r"#{1,6}\s+\S.{0,60}"                                     # Markdown 标题
+    r"|\*\*[^*]{1,40}\*\*"                                    # 整行加粗（常作小标题）
+    r"|第[一二三四五六七八九十百千0-9]{1,6}[章篇部节][^。]{0,40}"   # 第X章/节
+    r"|[一二三四五六七八九十]{1,4}[、.．]\s*\S[^。；，,]{0,24}"    # 一、二、
+    r"|[（(][一二三四五六七八九十0-9]{1,4}[)）]\s*\S[^。]{0,24}"   # （一）
+    r"|\d{1,3}\.\d+(?:\.\d+)*[、.．)）]?\s*\S[^。]{0,24}"         # 1.1 多级编号
+    r"|\d{1,3}[、.．)）]\s*\S[^。；，,]{0,18}"                    # 1./1、 单级编号（限短标题）
+    r"|\d{1,3}\s+\S[^。；，,]{0,18}"                             # 1 范围（国标风格）
+    r")$"
+)
+
+
+def _split_sentences(text: str) -> list[str]:
+    """按句末标点切句（保留标点），兼容中英文。"""
+    parts = re.split(r"(?<=[。！？；!?;])|(?<=[.])(?=\s)", text)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _split_units(section: str, size: int) -> list[str]:
+    """把节内容打散为不超过 size 的最小单元：段落 → 行 → 句 → 硬切兜底。"""
+    units = []
+    for para in re.split(r"\n\s*\n", section):
+        para = para.strip()
+        if not para:
+            continue
+        for line in para.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if len(line) <= size:
+                units.append(line)
+                continue
+            for sent in _split_sentences(line):
+                if len(sent) <= size:
+                    units.append(sent)
+                else:  # 无标点超长串（长表格行/URL 等）：硬切
+                    units.extend(
+                        sent[i : i + size].strip()
+                        for i in range(0, len(sent), size)
+                    )
+    return units
+
+
+def _chunk_section(section: str, size: int) -> list[str]:
+    """节内分块：把最小单元聚合为不超过 size 的块，换行连接保留结构。"""
+    if len(section) <= size:
+        return [section]
+    chunks, buf = [], ""
+    for unit in _split_units(section, size):
+        if buf and len(buf) + len(unit) + 1 > size:
+            chunks.append(buf)
+            buf = unit
+        else:
+            buf = f"{buf}\n{unit}" if buf else unit
+    if buf:
+        chunks.append(buf)
+    return chunks
+
+
+def _tail_context(prev: str, overlap: int) -> str:
+    """从上一块尾部取不超过 overlap 字符的完整句子，作为下一块的上下文回看。"""
+    tail = prev[-(overlap * 2) :] if len(prev) > overlap * 2 else prev
+    picked, total = [], 0
+    for s in _split_sentences(tail):
+        if picked and total + len(s) > overlap:
+            break
+        if not picked and len(s) > overlap:  # 单句超长：取句尾
+            return s[-overlap:]
+        picked.append(s)
+        total += len(s)
+    return "".join(picked)
+
+
 def chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP):
-    """固定步长分块，overlap 保证语义连续。"""
+    """结构感知分块：标题分节 → 节内段落/行/句聚合 → 相邻块尾部重叠。
+
+    规则：
+    1. 优先按标题行（Markdown #、第X章、一、/1.1/（一）等）切节，标题随块保留；
+    2. 节内按空行分段、段内按行聚合，超长行再按句末标点切分；
+    3. 同一节被拆成多块时，后续块自动补挂节标题，保持检索时的语义定位；
+    4. 相邻块之间回看携带不超过 overlap 字符的完整句子作为上下文。
+    """
     text = text.strip()
     if not text:
         return []
+
+    # 1) 按标题行切节
+    sections, heading, body = [], "", []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line and _HEADING_RE.match(line):
+            if heading or any(l.strip() for l in body):
+                sections.append((heading, "\n".join(body).strip()))
+            heading, body = line, []
+        else:
+            body.append(raw)
+    if heading or any(l.strip() for l in body):
+        sections.append((heading, "\n".join(body).strip()))
+
+    # 1.5) 合并无正文的标题节（如父标题下直接是子标题）：标题链并入下一节，
+    #      避免产生只有标题的孤块；末尾孤立标题并回上一节。
+    merged, pending_heads = [], []
+    for head, body_text in sections:
+        if not body_text:
+            if head:
+                pending_heads.append(head)
+            continue
+        if pending_heads:
+            head = "\n".join(pending_heads + ([head] if head else []))
+            pending_heads = []
+        merged.append((head, body_text))
+    if pending_heads:
+        if merged:
+            last_head, last_body = merged[-1]
+            merged[-1] = (last_head, f"{last_body}\n" + "\n".join(pending_heads))
+        else:
+            merged.append(("\n".join(pending_heads), ""))
+    sections = merged
+
+    # 2) 节内分块；非首块补挂节标题
     chunks = []
-    start = 0
-    while start < len(text):
-        chunk = text[start : start + size].strip()
-        if chunk:
-            chunks.append(chunk)
-        start += size - overlap
-    return chunks
+    for head, body_text in sections:
+        sec = f"{head}\n{body_text}".strip() if head else body_text
+        if not sec:
+            continue
+        for i, c in enumerate(_chunk_section(sec, size)):
+            if i > 0 and head and not c.startswith(head):
+                c = f"{head}\n{c}"
+            chunks.append(c)
+
+    # 3) 相邻块尾部重叠（按完整句子对齐）
+    if overlap > 0 and len(chunks) > 1:
+        result = [chunks[0]]
+        for prev, cur in zip(chunks, chunks[1:]):
+            ctx = _tail_context(prev, overlap)
+            result.append(f"{ctx}\n{cur}" if ctx else cur)
+        chunks = result
+
+    return [c.strip() for c in chunks if c.strip()]
 
 
 def _embed(client, model, texts):

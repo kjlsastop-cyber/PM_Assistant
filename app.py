@@ -4,8 +4,10 @@
 启动：python -m streamlit run app.py --server.headless true --browser.gatherUsageStats false
 """
 import base64
+import io
 import json
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -260,6 +262,170 @@ def _run_self_review(client, model_name: str, query: str,
         return None
 
 
+def _extract_greeting(prompt_text: str) -> tuple[str, str]:
+    """提取提示词文件内嵌的开场白（<!--GREETING ... GREETING-->），返回 (系统提示词, 开场白)。"""
+    m = re.search(r"<!--GREETING\s*\n(.*?)\n\s*GREETING-->", prompt_text, re.DOTALL)
+    if m:
+        return prompt_text[: m.start()].strip(), m.group(1).strip()
+    return prompt_text.strip(), ""
+
+
+def _ppt_outline(client, model_name: str, content: str) -> dict | None:
+    """调用模型把内容提炼为 PPT 页面大纲（JSON），失败返回 None。"""
+    system = (
+        "你是资深演示设计顾问。将用户内容改写为适合演示的 PPT 大纲，只输出纯 JSON，"
+        "不要 markdown 代码块或其他任何文字。格式：\n"
+        '{"title":"演示标题","slides":[{"title":"页标题","bullets":["要点1","要点2"],'
+        '"notes":"演讲备注"}]}\n'
+        "要求：总页数控制在 5~10 页；每页要点 3~5 条，每条不超过 30 字，"
+        "提炼为观点式短句而非原文照搬；notes 为该页演讲提示，不超过 60 字。"
+    )
+    try:
+        resp = client.chat.completions.create(
+            model=model_name,
+            temperature=0.4,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": content[:12000]},
+            ],
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw)  # 剥离可能的代码块包裹
+        data = json.loads(raw)
+        if isinstance(data, dict) and data.get("slides"):
+            return data
+    except Exception:
+        return None
+    return None
+
+
+def _fallback_outline(content: str) -> dict:
+    """模型不可用/失败时的兜底：按 Markdown 标题与段落规则切分大纲。"""
+    title, slides, cur_slide = "", [], None
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            t = line.lstrip("#").strip()
+            if not title:
+                title = t
+                continue
+            cur_slide = {"title": t, "bullets": [], "notes": ""}
+            slides.append(cur_slide)
+        else:
+            if cur_slide is None:
+                cur_slide = {"title": "内容要点", "bullets": [], "notes": ""}
+                slides.append(cur_slide)
+            cur_slide["bullets"].append(line.lstrip("-*• ").strip())
+    for s in slides:
+        s["bullets"] = [b for b in s["bullets"] if b][:6]
+    if not slides:
+        slides = [{"title": "内容要点", "bullets": [content[:120]], "notes": ""}]
+    return {"title": title or "演示文稿", "slides": slides[:10]}
+
+
+def _build_pptx(outline: dict, source_title: str = "") -> bytes:
+    """按大纲生成奶油企鹅风 16:9 PPT，返回 .pptx 文件字节。"""
+    from pptx import Presentation
+    from pptx.dml.color import RGBColor
+    from pptx.enum.shapes import MSO_SHAPE
+    from pptx.util import Inches, Pt
+
+    BG = RGBColor(0xFD, 0xF6, 0xEC)      # 奶油底
+    ACCENT = RGBColor(0xF2, 0xB9, 0x5C)  # 企鹅橙
+    DARK = RGBColor(0x33, 0x38, 0x3F)    # 深灰正文
+    GRAY = RGBColor(0x8A, 0x7A, 0x5F)    # 暖灰辅助
+
+    prs = Presentation()
+    prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5)
+    blank = prs.slide_layouts[6]
+
+    def _new_slide():
+        s = prs.slides.add_slide(blank)
+        s.background.fill.solid()
+        s.background.fill.fore_color.rgb = BG
+        return s
+
+    # 封面
+    cover = _new_slide()
+    tb = cover.shapes.add_textbox(Inches(1.2), Inches(2.7), Inches(10.9), Inches(1.6))
+    tf = tb.text_frame
+    tf.word_wrap = True
+    p = tf.paragraphs[0]
+    p.text = str(outline.get("title") or source_title or "演示文稿").strip()
+    p.font.size, p.font.bold, p.font.color.rgb = Pt(40), True, DARK
+    sub = cover.shapes.add_textbox(Inches(1.25), Inches(4.4), Inches(10.9), Inches(0.6))
+    sp = sub.text_frame.paragraphs[0]
+    sp.text = "🐧 由咕咕嘎嘎助手生成"
+    sp.font.size, sp.font.color.rgb = Pt(16), GRAY
+
+    # 内容页
+    for i, s in enumerate(outline.get("slides", []), 1):
+        slide = _new_slide()
+        title_tb = slide.shapes.add_textbox(Inches(0.8), Inches(0.5), Inches(11.7), Inches(0.9))
+        tf = title_tb.text_frame
+        tf.word_wrap = True
+        p = tf.paragraphs[0]
+        p.text = f"{i}. {str(s.get('title') or '').strip()}"
+        p.font.size, p.font.bold, p.font.color.rgb = Pt(28), True, DARK
+        bar = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE, Inches(0.85), Inches(1.45), Inches(1.6), Inches(0.07)
+        )
+        bar.fill.solid()
+        bar.fill.fore_color.rgb = ACCENT
+        bar.line.fill.background()
+        bullets = [str(b).strip() for b in (s.get("bullets") or []) if str(b).strip()][:6]
+        body = slide.shapes.add_textbox(Inches(1.1), Inches(1.9), Inches(11.1), Inches(4.9))
+        tf = body.text_frame
+        tf.word_wrap = True
+        for j, b in enumerate(bullets):
+            para = tf.paragraphs[0] if j == 0 else tf.add_paragraph()
+            para.text = f"• {b}"
+            para.font.size, para.font.color.rgb = Pt(20), DARK
+            para.space_after = Pt(12)
+        notes = str(s.get("notes") or "").strip()
+        if notes:
+            slide.notes_slide.notes_text_frame.text = notes
+
+    buf = io.BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
+
+
+def _build_docx(topic_title: str, messages: list) -> bytes:
+    """把当前话题导出为 Word 文档（用户/助手问答完整保留）。"""
+    from docx import Document
+
+    doc = Document()
+    doc.add_heading(topic_title or "对话记录", level=0)
+    for m in messages:
+        if m.get("greeting"):  # 开场白不导出
+            continue
+        if m["role"] == "user":
+            doc.add_heading("🧑 提问", level=2)
+            doc.add_paragraph(m.get("display", ""))
+        else:
+            doc.add_heading("🐧 回答", level=2)
+            for para in m.get("display", "").split("\n"):
+                if para.strip():
+                    doc.add_paragraph(para)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def _autodownload(ext: str):
+    """注入 JS 自动触发一次下载点击，实现“生成完直接下载”。"""
+    import streamlit.components.v1 as components
+
+    js = (
+        "const links = window.parent.document.querySelectorAll('a[download$=\"" + ext + "\"]');"
+        "if (links.length) links[links.length - 1].click();"
+    )
+    components.html(f"<script>{js}</script>", height=0)
+
+
 if "topic_store" not in st.session_state:
     st.session_state.topic_store = _load_topics()
 if "cur_topic" not in st.session_state:
@@ -284,7 +450,9 @@ with st.sidebar:
     if st.session_state.get("assistant_sel") not in names:
         st.session_state.pop("assistant_sel", None)
     chosen = st.selectbox("当前助手", names, key="assistant_sel")
-    SYSTEM_PROMPT = assistants[chosen].read_text(encoding="utf-8").strip()
+    SYSTEM_PROMPT, GREETING = _extract_greeting(
+        assistants[chosen].read_text(encoding="utf-8")
+    )
     knowledge_base = _get_kb(chosen)  # 使用缓存的知识库实例
 
     st.title(f"🐧 {chosen}")
@@ -302,6 +470,11 @@ with st.sidebar:
         st.session_state.cur_topic[chosen] = cur["id"]
         _save_topics(store)
     messages = cur["messages"]
+    if not messages and GREETING:  # 新话题由助手主动发起开场白（仅展示，不进模型上下文）
+        messages.append(
+            {"role": "assistant", "display": GREETING, "content": "", "greeting": True}
+        )
+        _save_topics(store)
 
     st.subheader("历史对话")
     if st.button("+ 新建话题", key="new_topic", type="tertiary", use_container_width=True):
@@ -428,6 +601,60 @@ with st.sidebar:
             _get_kb.clear()
             st.rerun()
 
+# ---------- 产出工具栏：PPT 生成 / 对话导出 ----------
+last_reply = next(
+    (m for m in reversed(messages) if m["role"] == "assistant" and not m.get("greeting")),
+    None,
+)
+has_content = any(not m.get("greeting") for m in messages)
+_t1, _t2, _t3 = st.columns([3, 1, 1])
+with _t2:
+    ppt_btn = st.button(
+        "📊 生成 PPT",
+        disabled=last_reply is None or client is None,
+        help="将助手最新回复提炼为演示结构，排版生成 .pptx（含演讲备注）",
+    )
+with _t3:
+    doc_btn = st.button(
+        "📤 导出对话",
+        disabled=not has_content,
+        help="把当前话题完整导出为 Word 文档",
+    )
+
+if ppt_btn and last_reply is not None and client is not None:
+    with st.spinner("📊 正在分析内容并排版 PPT（约 10~30 秒）…"):
+        src = last_reply.get("content") or last_reply.get("display") or ""
+        outline = _ppt_outline(client, model_name, src) or _fallback_outline(src)
+        st.session_state.ppt_bytes = _build_pptx(outline, cur["title"])
+        st.session_state.ppt_autodl = True
+
+if doc_btn and has_content:
+    with st.spinner("📤 正在生成 Word 文档…"):
+        st.session_state.docx_bytes = _build_docx(cur["title"], messages)
+        st.session_state.docx_autodl = True
+
+if st.session_state.get("ppt_bytes"):
+    st.download_button(
+        "⬇️ 下载 PPT",
+        data=st.session_state["ppt_bytes"],
+        file_name=f"{(cur['title'] or '演示文稿')[:20]}.pptx",
+        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        key="ppt_dl",
+    )
+    if st.session_state.pop("ppt_autodl", False):
+        _autodownload(".pptx")
+
+if st.session_state.get("docx_bytes"):
+    st.download_button(
+        "⬇️ 下载 Word",
+        data=st.session_state["docx_bytes"],
+        file_name=f"{(cur['title'] or '对话记录')[:20]}.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        key="docx_dl",
+    )
+    if st.session_state.pop("docx_autodl", False):
+        _autodownload(".docx")
+
 # ---------- 历史消息 ----------
 for msg in messages:
     with st.chat_message(
@@ -494,9 +721,10 @@ if submission and ((submission.text or "").strip() or submission.files):
     ]
     api_content = "\n\n".join(parts)
 
-    # 4) 上下文截断：发送给模型的历史对话
+    # 4) 上下文截断：发送给模型的历史对话（开场白仅展示，不进上下文）
     messages_for_api = _truncate_history(
-        [{"role": "system", "content": SYSTEM_PROMPT}] + messages
+        [{"role": "system", "content": SYSTEM_PROMPT}]
+        + [m for m in messages if not m.get("greeting")]
     )
 
     display = user_input
@@ -504,7 +732,7 @@ if submission and ((submission.text or "").strip() or submission.files):
         display += "\n\n📎 " + "、".join(f.name for f in chat_files)
     messages.append({"role": "user", "display": display, "content": api_content})
     title_changed = False
-    if len(messages) == 1:  # 话题首条消息自动作为话题标题
+    if sum(1 for m in messages if m["role"] == "user") == 1:  # 首条提问自动作为话题标题
         cur["title"] = user_input.replace("\n", " ")[:18]
         title_changed = True
     with st.chat_message("user"):
