@@ -553,37 +553,42 @@ def _build_docx(topic_title: str, messages: list) -> bytes:
     - 空内容兜底，确保文档不空白
     """
     from docx import Document
-    from docx.shared import Inches, Pt, Emu, RGBColor
+    from docx.shared import Inches, Pt, Emu, RGBColor, Cm
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
 
     doc = Document()
 
-    # --- 页面设置：A4，标准边距 ---
+    # --- 页面设置：A4，标准边距（python-docx 长度单位为 EMU，用 Cm 换算）---
     section = doc.sections[0]
-    section.page_width = Emu(12240)
-    section.page_height = Emu(15840)
-    section.top_margin = Emu(1440)
-    section.bottom_margin = Emu(1440)
-    section.left_margin = Emu(1440)
-    section.right_margin = Emu(1440)
+    section.page_width = Cm(21.0)
+    section.page_height = Cm(29.7)
+    section.top_margin = Cm(2.54)
+    section.bottom_margin = Cm(2.54)
+    section.left_margin = Cm(2.54)
+    section.right_margin = Cm(2.54)
+
+    # --- 中文字体：为默认样式设置东亚字体，避免 WPS/Word 显示乱码方块 ---
+    for style_name in ("Normal", "Title", "Heading 1", "Heading 2", "List Bullet"):
+        try:
+            _set_style_cjk(doc.styles[style_name])
+        except KeyError:
+            pass
 
     # --- 页眉 ---
     header = section.header
     hp = header.paragraphs[0]
     hp.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     run = hp.add_run(topic_title or "对话记录")
-    run.font.size = Pt(9)
-    run.font.color.rgb = RGBColor(0x8A, 0x7A, 0x5F)
+    _set_run_cjk(run, size=Pt(9), color=RGBColor(0x8A, 0x7A, 0x5F))
 
     # --- 页脚 + 页码 ---
     footer = section.footer
     fp = footer.paragraphs[0]
     fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run1 = fp.add_run("第 ")
-    run1.font.size = Pt(9)
-    run1.font.color.rgb = RGBColor(0x8A, 0x7A, 0x5F)
+    _set_run_cjk(run1, size=Pt(9), color=RGBColor(0x8A, 0x7A, 0x5F))
     fld_begin = OxmlElement('w:fldChar')
     fld_begin.set(qn('w:fldCharType'), 'begin')
     instr = OxmlElement('w:instrText')
@@ -594,11 +599,9 @@ def _build_docx(topic_title: str, messages: list) -> bytes:
     run2._r.append(fld_begin)
     run2._r.append(instr)
     run2._r.append(fld_end)
-    run2.font.size = Pt(9)
-    run2.font.color.rgb = RGBColor(0x8A, 0x7A, 0x5F)
+    _set_run_cjk(run2, size=Pt(9), color=RGBColor(0x8A, 0x7A, 0x5F))
     run3 = fp.add_run(" 页 / 共 ")
-    run3.font.size = Pt(9)
-    run3.font.color.rgb = RGBColor(0x8A, 0x7A, 0x5F)
+    _set_run_cjk(run3, size=Pt(9), color=RGBColor(0x8A, 0x7A, 0x5F))
     run4 = fp.add_run()
     fld_begin2 = OxmlElement('w:fldChar')
     fld_begin2.set(qn('w:fldCharType'), 'begin')
@@ -609,29 +612,25 @@ def _build_docx(topic_title: str, messages: list) -> bytes:
     run4._r.append(fld_begin2)
     run4._r.append(instr2)
     run4._r.append(fld_end2)
-    run4.font.size = Pt(9)
-    run4.font.color.rgb = RGBColor(0x8A, 0x7A, 0x5F)
+    _set_run_cjk(run4, size=Pt(9), color=RGBColor(0x8A, 0x7A, 0x5F))
     run5 = fp.add_run(" 页")
-    run5.font.size = Pt(9)
-    run5.font.color.rgb = RGBColor(0x8A, 0x7A, 0x5F)
+    _set_run_cjk(run5, size=Pt(9), color=RGBColor(0x8A, 0x7A, 0x5F))
 
     # --- 文档标题 ---
     doc_title = topic_title or "对话记录"
     title_h = doc.add_heading(doc_title, level=0)
     for run in title_h.runs:
-        run.font.color.rgb = RGBColor(0x1E, 0x3A, 0x5F)
+        _set_run_cjk(run, color=RGBColor(0x1E, 0x3A, 0x5F))
 
     # --- 生成日期 ---
     date_p = doc.add_paragraph()
     date_run = date_p.add_run(f"生成日期：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    date_run.font.size = Pt(10)
-    date_run.font.color.rgb = RGBColor(0x8A, 0x7A, 0x5F)
+    _set_run_cjk(date_run, size=Pt(10), color=RGBColor(0x8A, 0x7A, 0x5F))
 
     # --- 分隔线 ---
     sep = doc.add_paragraph()
-    sep_run = sep.add_run("─" * 60)
-    sep_run.font.size = Pt(6)
-    sep_run.font.color.rgb = RGBColor(0xF2, 0xB9, 0x5C)
+    sep_run = sep.add_run("-" * 60)
+    _set_run_cjk(sep_run, size=Pt(6), color=RGBColor(0xF2, 0xB9, 0x5C))
 
     # --- 对话内容 ---
     content_written = False
@@ -651,17 +650,16 @@ def _build_docx(topic_title: str, messages: list) -> bytes:
 
         # 角色分隔
         separator = doc.add_paragraph()
-        sep_run2 = separator.add_run("━" * 40)
-        sep_run2.font.size = Pt(6)
-        sep_run2.font.color.rgb = RGBColor(0xD0, 0xD0, 0xD0)
+        sep_run2 = separator.add_run("-" * 40)
+        _set_run_cjk(sep_run2, size=Pt(6), color=RGBColor(0xD0, 0xD0, 0xD0))
 
-        # 角色标签
+        # 角色标签（不用 emoji，避免无 emoji 字体时显示方块）
         if role == "user":
-            h = doc.add_heading("🧑 用户", level=2)
+            h = doc.add_heading("【用户提问】", level=2)
         else:
-            h = doc.add_heading("🐧 助手", level=2)
+            h = doc.add_heading("【助手回答】", level=2)
         for run in h.runs:
-            run.font.color.rgb = RGBColor(0x1E, 0x3A, 0x5F)
+            _set_run_cjk(run, color=RGBColor(0x1E, 0x3A, 0x5F))
 
         # 正文段落
         for line in text.split("\n"):
@@ -673,8 +671,7 @@ def _build_docx(topic_title: str, messages: list) -> bytes:
             else:
                 p = doc.add_paragraph(stripped)
             for run in p.runs:
-                run.font.size = Pt(11)
-                run.font.color.rgb = body_font
+                _set_run_cjk(run, size=Pt(11), color=body_font)
 
     # --- 空内容兜底 ---
     if not content_written:
@@ -683,20 +680,43 @@ def _build_docx(topic_title: str, messages: list) -> bytes:
             "本次对话暂无可导出的内容。请在对话框中发送消息后再尝试导出。"
         )
         for run in fallback.runs:
-            run.font.size = Pt(12)
-            run.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+            _set_run_cjk(run, size=Pt(12), color=RGBColor(0x66, 0x66, 0x66))
 
     # --- 结尾 ---
     doc.add_paragraph()
     end_p = doc.add_paragraph()
     end_run = end_p.add_run("—— 由咕咕嘎嘎 PM Assistant 生成 ——")
-    end_run.font.size = Pt(9)
-    end_run.font.color.rgb = RGBColor(0x8A, 0x7A, 0x5F)
+    _set_run_cjk(end_run, size=Pt(9), color=RGBColor(0x8A, 0x7A, 0x5F))
     end_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
+
+
+def _set_style_cjk(style, font_name: str = "微软雅黑"):
+    """为样式设置东亚字体（w:eastAsia），确保中文在 Word/WPS 正确渲染。"""
+    from docx.oxml.ns import qn
+    style.font.name = font_name
+    rpr = style.element.get_or_add_rPr()
+    rfonts = rpr.find(qn('w:rFonts'))
+    if rfonts is None:
+        rfonts = rpr.makeelement(qn('w:rFonts'), {})
+        rpr.append(rfonts)
+    rfonts.set(qn('w:eastAsia'), font_name)
+
+
+def _set_run_cjk(run, font_name: str = "微软雅黑", size=None, color=None, bold=None):
+    """为 run 设置中文字体（含 w:eastAsia）、字号、颜色。"""
+    from docx.oxml.ns import qn
+    run.font.name = font_name
+    run._element.rPr.rFonts.set(qn('w:eastAsia'), font_name)
+    if size is not None:
+        run.font.size = size
+    if color is not None:
+        run.font.color.rgb = color
+    if bold is not None:
+        run.font.bold = bold
 
 
 def _is_list_item(text: str) -> bool:
@@ -884,12 +904,8 @@ def _fill_slide_content(slide, content: dict):
         run.font.size = Pt(36)
         run.font.bold = True
     else:
-        # 新建标题文本框
-        left = Emu(0x0F000000)  # ~2.54cm
-        top = Emu(0x0F000000)   # ~2.54cm
-        width = Emu(0x08000000)
-        height = Emu(0x01500000)
-        txBox = slide.shapes.add_textbox(left, top, width, height)
+        # 新建标题文本框（16:9 画布 13.33 x 7.5 英寸）
+        txBox = slide.shapes.add_textbox(Inches(0.8), Inches(0.6), Inches(11.7), Inches(1.2))
         tf = txBox.text_frame
         tf.word_wrap = True
         p = tf.paragraphs[0]
@@ -900,11 +916,7 @@ def _fill_slide_content(slide, content: dict):
 
     # 填充副标题
     if subtitle:
-        left = Emu(0x0F000000)
-        top = Emu(0x02800000)
-        width = Emu(0x08000000)
-        height = Emu(0x00800000)
-        txBox = slide.shapes.add_textbox(left, top, width, height)
+        txBox = slide.shapes.add_textbox(Inches(0.8), Inches(1.9), Inches(11.7), Inches(0.6))
         tf = txBox.text_frame
         p = tf.paragraphs[0]
         run = p.add_run()
@@ -926,12 +938,8 @@ def _fill_slide_content(slide, content: dict):
                 run.text = f"• {bullet}"
                 run.font.size = Pt(18)
         else:
-            # 新建正文文本框
-            left = Emu(0x0F000000)
-            top = Emu(0x03800000)
-            width = Emu(0x08000000)
-            height = Emu(0x05000000)
-            txBox = slide.shapes.add_textbox(left, top, width, height)
+            # 新建正文文本框（16:9 画布 13.33 x 7.5 英寸）
+            txBox = slide.shapes.add_textbox(Inches(0.8), Inches(2.6), Inches(11.7), Inches(4.3))
             tf = txBox.text_frame
             tf.word_wrap = True
             for i, bullet in enumerate(bullets):
