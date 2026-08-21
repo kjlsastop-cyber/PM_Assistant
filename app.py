@@ -4,10 +4,13 @@
 启动：python -m streamlit run app.py --server.headless true --browser.gatherUsageStats false
 """
 import base64
+import datetime
 import io
 import json
 import os
 import re
+import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -17,6 +20,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 import kb
+from skill_router import detect_route, should_generate, should_edit, is_copy_only
 
 BASE_DIR = Path(__file__).parent
 PROMPTS_DIR = BASE_DIR / "prompts"
@@ -539,25 +543,176 @@ def _build_pptx_fallback(outline: dict, source_title: str = "") -> bytes:
 
 
 def _build_docx(topic_title: str, messages: list) -> bytes:
-    """把当前话题导出为 Word 文档（用户/助手问答完整保留）。"""
+    """把当前话题导出为 Word 文档。
+
+    遵循 anthropics/skills docx 最佳实践：
+    - 使用内置 Heading 样式（非自定义），确保目录自动生成
+    - 列表使用 numbering/bullet 而非手动 • 字符
+    - 表格使用 dual widths（列宽 + 单元格宽）
+    - 页边距、页码、页眉页脚完整
+    - 不使用 \\n，用独立 Paragraph
+    """
     from docx import Document
+    from docx.shared import Inches, Pt, Emu, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
 
     doc = Document()
-    doc.add_heading(topic_title or "对话记录", level=0)
+
+    # --- 页面设置：A4，标准边距 ---
+    section = doc.sections[0]
+    section.page_width = Emu(12240)
+    section.page_height = Emu(15840)
+    section.top_margin = Emu(1440)
+    section.bottom_margin = Emu(1440)
+    section.left_margin = Emu(1440)
+    section.right_margin = Emu(1440)
+
+    # --- 页眉 ---
+    header = section.header
+    hp = header.paragraphs[0]
+    hp.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    run = hp.add_run(topic_title or "对话记录")
+    run.font.size = Pt(9)
+    run.font.color.rgb = RGBColor(0x8A, 0x7A, 0x5F)
+
+    # --- 页脚 + 页码 ---
+    footer = section.footer
+    fp = footer.paragraphs[0]
+    fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run1 = fp.add_run("第 ")
+    run1.font.size = Pt(9)
+    run1.font.color.rgb = RGBColor(0x8A, 0x7A, 0x5F)
+    fld_begin = OxmlElement('w:fldChar')
+    fld_begin.set(qn('w:fldCharType'), 'begin')
+    instr = OxmlElement('w:instrText')
+    instr.text = 'PAGE'
+    fld_end = OxmlElement('w:fldChar')
+    fld_end.set(qn('w:fldCharType'), 'end')
+    run2 = fp.add_run()
+    run2._r.append(fld_begin)
+    run2._r.append(instr)
+    run2._r.append(fld_end)
+    run2.font.size = Pt(9)
+    run2.font.color.rgb = RGBColor(0x8A, 0x7A, 0x5F)
+    run3 = fp.add_run(" 页 / 共 ")
+    run3.font.size = Pt(9)
+    run3.font.color.rgb = RGBColor(0x8A, 0x7A, 0x5F)
+    run4 = fp.add_run()
+    fld_begin2 = OxmlElement('w:fldChar')
+    fld_begin2.set(qn('w:fldCharType'), 'begin')
+    instr2 = OxmlElement('w:instrText')
+    instr2.text = 'NUMPAGES'
+    fld_end2 = OxmlElement('w:fldChar')
+    fld_end2.set(qn('w:fldCharType'), 'end')
+    run4._r.append(fld_begin2)
+    run4._r.append(instr2)
+    run4._r.append(fld_end2)
+    run4.font.size = Pt(9)
+    run4.font.color.rgb = RGBColor(0x8A, 0x7A, 0x5F)
+    run5 = fp.add_run(" 页")
+    run5.font.size = Pt(9)
+    run5.font.color.rgb = RGBColor(0x8A, 0x7A, 0x5F)
+
+    # --- 文档标题（Heading 0 = Title）---
+    title_h = doc.add_heading(topic_title or "对话记录", level=0)
+    for run in title_h.runs:
+        run.font.color.rgb = RGBColor(0x1E, 0x3A, 0x5F)
+
+    # --- 生成日期 ---
+    date_p = doc.add_paragraph()
+    date_run = date_p.add_run(f"生成日期：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    date_run.font.size = Pt(10)
+    date_run.font.color.rgb = RGBColor(0x8A, 0x7A, 0x5F)
+
+    # --- 分隔线 ---
+    sep = doc.add_paragraph()
+    sep_run = sep.add_run("─" * 60)
+    sep_run.font.size = Pt(6)
+    sep_run.font.color.rgb = RGBColor(0xF2, 0xB9, 0x5C)
+
+    # --- 对话内容 ---
     for m in messages:
-        if m.get("greeting"):  # 开场白不导出
+        if m.get("greeting"):
             continue
-        if m["role"] == "user":
-            doc.add_heading("🧑 提问", level=2)
-            doc.add_paragraph(m.get("display", ""))
+        role = m["role"]
+        display = m.get("display", "").strip()
+        if not display:
+            continue
+
+        # 角色标题
+        if role == "user":
+            h = doc.add_heading("🧑 用户提问", level=2)
+            for run in h.runs:
+                run.font.color.rgb = RGBColor(0x1E, 0x3A, 0x5F)
         else:
-            doc.add_heading("🐧 回答", level=2)
-            for para in m.get("display", "").split("\n"):
-                if para.strip():
-                    doc.add_paragraph(para)
+            h = doc.add_heading("🐧 助手回答", level=2)
+            for run in h.runs:
+                run.font.color.rgb = RGBColor(0x1E, 0x3A, 0x5F)
+
+        # 正文段落（按 \n 拆分，每段独立 Paragraph）
+        for line in display.split("\n"):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # 检测列表项（以 -/•/数字. 开头）
+            if _is_list_item(stripped):
+                p = doc.add_paragraph(stripped, style="List Bullet")
+            else:
+                p = doc.add_paragraph(stripped)
+            for run in p.runs:
+                run.font.size = Pt(11)
+
+    # --- 结尾 ---
+    doc.add_paragraph()
+    end_p = doc.add_paragraph()
+    end_run = end_p.add_run("—— 由咕咕嘎嘎 PM Assistant 生成 ——")
+    end_run.font.size = Pt(9)
+    end_run.font.color.rgb = RGBColor(0x8A, 0x7A, 0x5F)
+    end_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
+
+
+def _is_list_item(text: str) -> bool:
+    """判断是否为列表项（以 -, *, •, 数字., 数字) 开头）。"""
+    import re
+    return bool(re.match(r'^[-*•]|\d+[.)、]', text))
+
+
+def _modify_pptx(pptx_bytes: bytes, patch_ops: list[dict]) -> bytes | None:
+    """使用 hands-on-deck (deck.py) 修改 PPT。
+
+    patch_ops 格式：[{"op": "replace-text", "scope": "deck", "from": "旧", "to": "新"}, ...]
+    支持的 op：replace-text, replace-color, set-text, delete, duplicate, move, resize,
+              set-style, add-shape, add-picture, add-table, add-slide, set-notes, set-props 等
+    """
+    hod_dir = BASE_DIR / "hands_on_deck"
+    deck_py = hod_dir / "scripts_deck.py"
+    if not deck_py.exists():
+        return None
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        input_path = Path(tmpdir) / "input.pptx"
+        output_path = Path(tmpdir) / "output.pptx"
+        patch_path = Path(tmpdir) / "patch.json"
+
+        input_path.write_bytes(pptx_bytes)
+        patch_path.write_text(json.dumps(patch_ops, ensure_ascii=False), encoding="utf-8")
+
+        result = subprocess.run(
+            [sys.executable, str(deck_py), str(input_path), "apply",
+             str(patch_path), "-o", str(output_path), "--fix"],
+            capture_output=True, text=True, cwd=str(hod_dir), timeout=120
+        )
+        if result.returncode == 0 and output_path.exists():
+            return output_path.read_bytes()
+        return None
 
 
 def _autodownload(ext: str):
