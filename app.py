@@ -350,38 +350,6 @@ def _get_template_bytes() -> bytes | None:
     return None
 
 
-def _fill_placeholder(ph, text: str):
-    """向占位符写入文本，保留模板原有样式（字体/字号/颜色）。"""
-    tf = ph.text_frame
-    tf.word_wrap = True
-    # 清空现有文本再写入
-    tf.clear()
-    p = tf.paragraphs[0]
-    p.text = text
-    for run in p.runs:
-        run.font.name = "微软雅黑"
-
-
-def _fill_body_placeholder(ph, bullets: list[str]):
-    """向 body 占位符写入多条要点，保留模板样式并添加项目符号。"""
-    from pptx.oxml.ns import qn
-    from lxml import etree
-
-    tf = ph.text_frame
-    tf.word_wrap = True
-    tf.clear()
-    for i, bullet in enumerate(bullets):
-        p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-        p.text = bullet
-        # 添加项目符号（buFont + buChar）
-        pPr = p._pPr
-        if pPr is None:
-            pPr = etree.SubElement(p._p, qn('a:pPr'))
-        buChar = etree.SubElement(pPr, qn('a:buChar'), char='•')
-        for run in p.runs:
-            run.font.name = "微软雅黑"
-
-
 def _build_pptx(outline: dict, source_title: str = "") -> bytes:
     """按大纲生成 PPT。优先使用模板（带占位符），失败时回退到空白画布。"""
     template_bytes = _get_template_bytes()
@@ -404,75 +372,197 @@ def _remove_slide(prs, slide_idx: int):
 
 
 def _build_pptx_from_template(outline: dict, source_title: str, template_bytes: bytes) -> bytes:
-    """基于模板生成 PPT：清空模板示例页 → 按版式选择布局 → 填充占位符。"""
+    """基于模板生成 PPT：复制模板示例页（保留背景/视觉设计），按特征替换文本。
+
+    模板基页约定（me.pptx）：
+    - 1  = 封面页（居中大标题 + 副标题 + 企鹅插画）
+    - 13 = 内容页（顶部标题栏 + 左侧大面板 + 右侧 3 组输入槽）
+    - 82 = 结尾页（Thank You）
+    """
     from pptx import Presentation
 
     prs = Presentation(io.BytesIO(template_bytes))
-
-    # 清空模板中的示例幻灯片（倒序删除，避免索引偏移）
-    for i in range(len(prs.slides) - 1, -1, -1):
-        _remove_slide(prs, i)
-
-    layouts = prs.slide_layouts
-    LAYOUT_COVER = layouts[0] if len(layouts) > 0 else layouts[6]
-    LAYOUT_CONTENT = layouts[1] if len(layouts) > 1 else layouts[6]
-    LAYOUT_SECTION = layouts[2] if len(layouts) > 2 else layouts[1]
-    LAYOUT_CLOSING = layouts[0] if len(layouts) > 0 else layouts[6]
-
     slides_data = outline.get("slides", [])
     title = str(outline.get("title") or source_title or "演示文稿").strip()
 
+    BASE_COVER, BASE_CONTENT, BASE_CLOSING = 1, 13, 82
+    n_base = len(prs.slides)
+
+    new_els = []  # 新页的 sldId 元素，按期望顺序记录
+
     # 1) 封面
-    cover = prs.slides.add_slide(LAYOUT_COVER)
-    for ph in cover.placeholders:
-        idx = ph.placeholder_format.idx
-        if idx == 0:
-            _fill_placeholder(ph, title)
-        elif idx == 1:
-            _fill_placeholder(ph, "🐧 由咕咕嘎嘎助手生成")
+    cover = _dup_slide(prs, BASE_COVER)
+    _fill_cover_slide(cover, title)
+    new_els.append(prs.slides._sldIdLst[-1])
 
-    # 2) 章节页 + 内容页
-    for i, s in enumerate(slides_data):
-        s_type = str(s.get("type") or "content").strip().lower()
+    # 2) 内容页
+    for s in slides_data:
         s_title = str(s.get("title") or "").strip()
-        bullets = [str(b).strip() for b in (s.get("bullets") or []) if str(b).strip()][:6]
-
-        if s_type in ("section", "divider", "chapter"):
-            slide = prs.slides.add_slide(LAYOUT_SECTION)
-            for ph in slide.placeholders:
-                idx = ph.placeholder_format.idx
-                if idx == 0:
-                    _fill_placeholder(ph, s_title)
-                elif idx == 1:
-                    desc = str(s.get("description") or s.get("notes") or "").strip()
-                    _fill_placeholder(ph, desc)
-        else:
-            slide = prs.slides.add_slide(LAYOUT_CONTENT)
-            for ph in slide.placeholders:
-                idx = ph.placeholder_format.idx
-                if idx == 0:
-                    _fill_placeholder(ph, s_title)
-                elif idx == 1:
-                    _fill_body_placeholder(ph, bullets)
-            notes = str(s.get("notes") or "").strip()
-            if notes:
-                try:
-                    slide.notes_slide.notes_text_frame.text = notes
-                except Exception:
-                    pass
+        bullets = [str(b).strip() for b in (s.get("bullets") or []) if str(b).strip()][:7]
+        slide = _dup_slide(prs, BASE_CONTENT)
+        _fill_content_slide(slide, s_title, bullets)
+        new_els.append(prs.slides._sldIdLst[-1])
+        notes = str(s.get("notes") or "").strip()
+        if notes:
+            try:
+                slide.notes_slide.notes_text_frame.text = notes
+            except Exception:
+                pass
 
     # 3) 结尾页
-    closing = prs.slides.add_slide(LAYOUT_CLOSING)
-    for ph in closing.placeholders:
-        idx = ph.placeholder_format.idx
-        if idx == 0:
-            _fill_placeholder(ph, "感谢聆听")
-        elif idx == 1:
-            _fill_placeholder(ph, "THANK YOU")
+    closing = _dup_slide(prs, BASE_CLOSING)
+    new_els.append(prs.slides._sldIdLst[-1])
+
+    # 4) 重排：新页移到最前（cover → 内容页 → 结尾页），原示例页留在尾部
+    sldIdLst = prs.slides._sldIdLst
+    for el in new_els:
+        sldIdLst.remove(el)
+    for el in reversed(new_els):
+        sldIdLst.insert(0, el)
+
+    # 5) 删除原示例页（现在位于尾部 n_base 张）
+    for i in range(len(prs.slides) - 1, len(prs.slides) - 1 - n_base, -1):
+        _remove_slide(prs, i)
 
     buf = io.BytesIO()
     prs.save(buf)
     return buf.getvalue()
+
+
+def _dup_slide(prs, index: int):
+    """深拷贝模板幻灯片（含图片等关联部件），保留全部视觉设计。"""
+    import copy
+    from pptx.oxml.ns import qn
+
+    template = prs.slides[index]
+    new_slide = prs.slides.add_slide(template.slide_layout)
+
+    # 清空新页默认形状（只保留组属性节点）
+    spTree = new_slide.shapes._spTree
+    for child in list(spTree):
+        if child.tag.endswith('}nvGrpSpPr') or child.tag.endswith('}grpSpPr'):
+            continue
+        spTree.remove(child)
+
+    # 复制关联关系（图片/超链接等），建立 rId 映射
+    rel_map = {}
+    for rId, rel in template.part.rels.items():
+        try:
+            if rel.is_external:
+                rel_map[rId] = new_slide.part.relate_to(
+                    rel.target_ref, rel.reltype, is_external=True)
+            else:
+                rel_map[rId] = new_slide.part.relate_to(rel.target_part, rel.reltype)
+        except Exception:
+            pass
+
+    def _remap(el):
+        for node in el.iter():
+            for attr in (qn('r:embed'), qn('r:link'), qn('r:id')):
+                v = node.get(attr)
+                if v in rel_map:
+                    node.set(attr, rel_map[v])
+
+    # 复制形状元素
+    src_spTree = template.shapes._spTree
+    for child in list(src_spTree):
+        if child.tag.endswith('}nvGrpSpPr') or child.tag.endswith('}grpSpPr'):
+            continue
+        el = copy.deepcopy(child)
+        _remap(el)
+        spTree.append(el)
+
+    # 复制页级背景（如有）
+    bg = template._element.find(qn('p:bg'))
+    if bg is not None:
+        el = copy.deepcopy(bg)
+        _remap(el)
+        new_slide._element.insert(0, el)
+
+    return new_slide
+
+
+def _set_tf_text(tf, text: str):
+    """替换文本框全部文本，保留首 run 的模板格式（字体/字号/颜色）。"""
+    p0 = tf.paragraphs[0]
+    runs = p0.runs
+    if runs:
+        runs[0].text = text
+        for r in runs[1:]:
+            r._r.getparent().remove(r._r)
+    else:
+        p0.text = text
+    for p in tf.paragraphs[1:]:
+        p._p.getparent().remove(p._p)
+
+
+def _fill_cover_slide(slide, title: str):
+    """封面页：大标题 + 副标题。"""
+    from pptx.util import Emu
+    for sh in slide.shapes:
+        if not sh.has_text_frame or not sh.text_frame.text.strip():
+            continue
+        try:
+            w, h, t = Emu(sh.width).inches, Emu(sh.height).inches, Emu(sh.top).inches
+        except Exception:
+            continue
+        if w >= 9 and h >= 2:  # 居中大标题
+            _set_tf_text(sh.text_frame, title)
+        elif t >= 4.4 and w >= 8:  # 副标题
+            _set_tf_text(sh.text_frame, "咕咕嘎嘎 PM Assistant 生成")
+
+
+def _fill_content_slide(slide, s_title: str, bullets: list):
+    """内容页：顶部标题栏 + 左面板标题 + 右侧输入槽 + 说明框。"""
+    from pptx.util import Emu
+    input_boxes, lorem_boxes, money_boxes, head_boxes = [], [], [], []
+    for sh in slide.shapes:
+        if sh.is_placeholder:
+            _set_tf_text(sh.text_frame, s_title)
+            continue
+        if not sh.has_text_frame:
+            continue
+        txt = sh.text_frame.text.strip()
+        if not txt:
+            continue
+        try:
+            w, h = Emu(sh.width).inches, Emu(sh.height).inches
+        except Exception:
+            continue
+        if w < 0.6:  # 序号小圆点，保留
+            continue
+        low = txt.lower()
+        if low.startswith("input"):
+            input_boxes.append((sh.top, sh))
+        elif "lorem" in low or "dummy" in low:
+            if "$" in txt or "mil" in low:
+                money_boxes.append((sh.top, sh))
+            else:
+                lorem_boxes.append((sh.top, sh))
+        elif "$" in txt:
+            money_boxes.append((sh.top, sh))
+        elif h <= 1.2 and w >= 2.5:
+            head_boxes.append((sh.top, sh))
+
+    input_boxes.sort(key=lambda x: x[0])
+    lorem_boxes.sort(key=lambda x: x[0])
+
+    # 左面板标题 ← 第 1 条要点
+    if head_boxes and bullets:
+        _set_tf_text(head_boxes[0][1].text_frame, bullets[0])
+    # 右侧输入槽 ← 第 2~4 条
+    for (top, sh), b in zip(input_boxes, bullets[1:4]):
+        _set_tf_text(sh.text_frame, b)
+    # 说明框 ← 第 5~7 条
+    for (top, sh), b in zip(lorem_boxes, bullets[4:7]):
+        _set_tf_text(sh.text_frame, b)
+    # 多余的占位文本清空
+    for top, sh in input_boxes[len(bullets[1:4]):]:
+        _set_tf_text(sh.text_frame, "")
+    for top, sh in lorem_boxes[len(bullets[4:7]):]:
+        _set_tf_text(sh.text_frame, "")
+    for top, sh in money_boxes:
+        _set_tf_text(sh.text_frame, "")
 
 
 def _build_pptx_fallback(outline: dict, source_title: str = "") -> bytes:
@@ -1133,13 +1223,25 @@ with st.sidebar:
     # ---------- 历史话题（各助手独立，上下文互不串扰） ----------
     store = st.session_state.topic_store
     topics = store.setdefault(chosen, [])
+
+    # 清理多余空话题（最多保留 1 个），避免刷新/进入时侧边栏堆满"新话题"
+    def _is_empty(t):
+        return not any(not m.get("greeting") for m in t["messages"])
+
+    empties = [t for t in topics if _is_empty(t)]
+    if len(empties) > 1:
+        for t in empties[1:]:
+            topics.remove(t)
+        _save_topics(store)
+
     cur = next(
         (t for t in topics if t["id"] == st.session_state.cur_topic.get(chosen)),
         None,
     )
-    if cur is None:  # 首次进入或当前话题已被删除
-        cur = _new_topic()
-        topics.insert(0, cur)
+    if cur is None:  # 首次进入或当前话题已被删除：优先复用空话题，不重复新建
+        cur = empties[0] if empties else _new_topic()
+        if cur not in topics:
+            topics.insert(0, cur)
         st.session_state.cur_topic[chosen] = cur["id"]
         _save_topics(store)
     messages = cur["messages"]
@@ -1290,46 +1392,20 @@ with st.sidebar:
             _get_kb.clear()
             st.rerun()
 
-# ---------- 产出工具栏：PPT 生成 / 对话导出 ----------
-last_reply = next(
-    (m for m in reversed(messages) if m["role"] == "assistant" and not m.get("greeting")),
-    None,
-)
-has_content = any(not m.get("greeting") for m in messages)
-_t1, _t2, _t3, _t4 = st.columns([2, 1, 1, 1])
-with _t2:
-    ppt_btn = st.button(
-        "📊 生成 PPT",
-        disabled=last_reply is None or client is None,
-        help="将助手最新回复提炼为演示结构，排版生成 .pptx（含演讲备注）",
+    # ---------- 编辑模式（增量修改已有 PPT/DOCX，只输出副本） ----------
+    st.subheader("🛠️ 编辑已有文档")
+    edit_file = st.file_uploader(
+        "上传要编辑的 PPT/DOCX",
+        type=["pptx", "docx"],
+        key="edit_target",
+        help="上传后用自然语言描述修改需求，AI 生成 patch 增量编辑（永不覆盖源文件）",
     )
-with _t3:
-    doc_btn = st.button(
-        "📤 导出 Word",
-        disabled=not has_content,
-        help="把当前话题完整导出为 Word 文档",
+    edit_instruction = st.text_area(
+        "修改指令",
+        placeholder="例如：把「营销场景」改成「武警舆情」，在最后添加一页项目总结",
+        key="edit_instr",
+        height=80,
     )
-with _t4:
-    edit_toggle = st.toggle("🛠️ 编辑模式", help="上传已有 PPT/DOCX 进行增量编辑")
-
-# ---------- 编辑模式：上传 + patch ----------
-if edit_toggle:
-    st.info("**编辑模式已启用**：上传已有 PPT/DOCX 文件，通过 AI 生成 patch 指令进行增量编辑（永远输出副本，不会覆盖源文件）")
-    edit_col1, edit_col2 = st.columns([1, 1])
-    with edit_col1:
-        edit_file = st.file_uploader(
-            "📎 上传要编辑的 PPT/DOCX",
-            type=["pptx", "docx"],
-            key="edit_target",
-            help="上传后，助手会读取文件，你可以用自然语言描述修改需求",
-        )
-    with edit_col2:
-        edit_instruction = st.text_area(
-            "✏️ 修改指令",
-            placeholder="例如：把第 3 页的「营销场景」改成「武警舆情」，在最后添加一页结束页",
-            key="edit_instr",
-            height=80,
-        )
 
     if edit_file is not None:
         file_bytes = edit_file.read()
@@ -1342,7 +1418,7 @@ if edit_toggle:
         if not decision.boundary_warnings:
             st.caption("✅ 文件检测：未发现 SmartArt/动画/修订标记等复杂元素")
 
-        st.caption(f"🔀 路由决策：**{decision.route}** | 安全模式：**{decision.safety['output_mode']}**")
+        st.caption(f"🔀 路由：**{decision.route}** | 安全：**{decision.safety['output_mode']}**")
 
         if decision.route == "edit_ppt" and edit_instruction and client is not None:
             if st.button("🚀 执行 PPT 修改", key="exec_edit_ppt"):
@@ -1350,8 +1426,8 @@ if edit_toggle:
                     patch = _instruction_to_patch(client, model_name, edit_instruction)
                     if patch:
                         result = _modify_pptx(file_bytes, patch,
-                                               client=client, model_name=model_name,
-                                               instruction=edit_instruction)
+                                              client=client, model_name=model_name,
+                                              instruction=edit_instruction)
                         if result:
                             st.session_state.edited_bytes = result
                             st.session_state.edited_name = f"edited_{edit_file.name}"
@@ -1362,7 +1438,6 @@ if edit_toggle:
                         st.error("❌ 无法生成 patch 指令，请简化修改描述")
 
         elif decision.route == "edit_docx":
-            st.info("📝 DOCX 编辑链路：使用 python-docx 进行增量修改（支持文本替换、段落增删、追加等）")
             if edit_instruction and st.button("🚀 执行 DOCX 修改", key="exec_edit_docx"):
                 with st.spinner("🔧 正在修改 DOCX…"):
                     edited = _modify_docx(file_bytes, edit_instruction, client=client, model_name=model_name)
@@ -1382,44 +1457,6 @@ if edit_toggle:
             key="edited_dl",
         )
 
-# ---------- 生成模式 ----------
-if not edit_toggle:
-    if ppt_btn and last_reply is not None and client is not None:
-        with st.spinner("📊 正在分析内容并排版 PPT（约 10~30 秒）…"):
-            src = last_reply.get("content") or last_reply.get("display") or ""
-            decision = detect_route("ppt_outline", content_bytes=None)
-            outline = _ppt_outline(client, model_name, src) or _fallback_outline(src)
-            st.session_state.ppt_bytes = _build_pptx(outline, cur["title"])
-            st.session_state.ppt_autodl = True
-
-    if doc_btn and has_content:
-        with st.spinner("📤 正在生成 Word 文档…"):
-            decision = detect_route("docx_outline", content_bytes=None)
-            st.session_state.docx_bytes = _build_docx(cur["title"], messages)
-            st.session_state.docx_autodl = True
-
-if st.session_state.get("ppt_bytes"):
-    st.download_button(
-        "⬇️ 下载 PPT",
-        data=st.session_state["ppt_bytes"],
-        file_name=f"{(cur['title'] or '演示文稿')[:20]}.pptx",
-        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        key="ppt_dl",
-    )
-    if st.session_state.pop("ppt_autodl", False):
-        _autodownload(".pptx")
-
-if st.session_state.get("docx_bytes"):
-    st.download_button(
-        "⬇️ 下载 Word",
-        data=st.session_state["docx_bytes"],
-        file_name=f"{(cur['title'] or '对话记录')[:20]}.docx",
-        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        key="docx_dl",
-    )
-    if st.session_state.pop("docx_autodl", False):
-        _autodownload(".docx")
-
 # ---------- 历史消息 ----------
 for msg in messages:
     with st.chat_message(
@@ -1430,6 +1467,66 @@ for msg in messages:
         if msg["role"] == "assistant" and msg.get("review"):
             with st.expander("🔍 自我审查结果", expanded=False):
                 st.markdown(msg["review"])
+
+# ---------- 操作条（紧贴输入框，界面更干净） ----------
+last_reply = next(
+    (m for m in reversed(messages) if m["role"] == "assistant" and not m.get("greeting")),
+    None,
+)
+has_content = any(not m.get("greeting") for m in messages)
+_ab0, _ab1, _ab2, _ab3, _ab4 = st.columns([1, 1, 1, 1, 1])
+with _ab1:
+    ppt_btn = st.button(
+        "📊 生成 PPT",
+        disabled=last_reply is None or client is None,
+        help="将助手最新回复提炼为演示结构，套用模板生成 .pptx（含演讲备注）",
+        use_container_width=True,
+    )
+with _ab2:
+    doc_btn = st.button(
+        "📤 导出 Word",
+        disabled=not has_content,
+        help="把当前话题完整导出为 Word 文档",
+        use_container_width=True,
+    )
+
+# ---------- 生成处理 ----------
+if ppt_btn and last_reply is not None and client is not None:
+    with st.spinner("📊 正在分析内容并套用模板排版 PPT（约 10~30 秒）…"):
+        src = last_reply.get("content") or last_reply.get("display") or ""
+        outline = _ppt_outline(client, model_name, src) or _fallback_outline(src)
+        st.session_state.ppt_bytes = _build_pptx(outline, cur["title"])
+        st.session_state.ppt_autodl = True
+
+if doc_btn and has_content:
+    with st.spinner("📤 正在生成 Word 文档…"):
+        st.session_state.docx_bytes = _build_docx(cur["title"], messages)
+        st.session_state.docx_autodl = True
+
+# ---------- 下载行 ----------
+_dl_items = []
+if st.session_state.get("ppt_bytes"):
+    _dl_items.append(("ppt", st.session_state["ppt_bytes"],
+                      f"{(cur['title'] or '演示文稿')[:20]}.pptx",
+                      "application/vnd.openxmlformats-officedocument.presentationml.presentation"))
+if st.session_state.get("docx_bytes"):
+    _dl_items.append(("docx", st.session_state["docx_bytes"],
+                      f"{(cur['title'] or '对话记录')[:20]}.docx",
+                      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"))
+if _dl_items:
+    _d0, _d1, _d2, _d3, _d4 = st.columns([1, 1, 1, 1, 1])
+    _dl_cols = [_d1, _d2]
+    for col, (kind, data, fname, mime) in zip(_dl_cols, _dl_items):
+        with col:
+            st.download_button(
+                "⬇️ 下载 PPT" if kind == "ppt" else "⬇️ 下载 Word",
+                data=data, file_name=fname, mime=mime,
+                key=f"{kind}_dl", use_container_width=True,
+            )
+    if st.session_state.pop("ppt_autodl", False):
+        _autodownload(".pptx")
+    if st.session_state.pop("docx_autodl", False):
+        _autodownload(".docx")
 
 # ---------- 输入与回复 ----------
 submission = st.chat_input(
