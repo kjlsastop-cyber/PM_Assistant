@@ -1,0 +1,12 @@
+.env
+kb_store*.json
+__pycache__/
+*.pyc
+history_topics.json
+.streamlit/*
+!.streamlit/config.toml
+venv/
+design_mockup.html
+assets/test_hod_edit.pptx
+assets/test_output.pptx
+hands_on_deck/test_patch.json
