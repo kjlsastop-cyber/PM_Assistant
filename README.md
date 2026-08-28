@@ -124,9 +124,10 @@ EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 EMBEDDING_MODEL=text-embedding-v3
 ```
 
-**可选：Rerank 精排**
+**可选：Rerank 精排（智谱）**
 ```bash
-RERANK_MODEL=qwen3-rerank
+RERANK_API_KEY=你的智谱密钥
+RERANK_MODEL=rerank
 ```
 
 ### 4. 启动应用
@@ -202,8 +203,9 @@ EMBEDDING_API_KEY = "your_embedding_api_key"
 EMBEDDING_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 EMBEDDING_MODEL = "text-embedding-v3"
 
-# 可选
-RERANK_MODEL = "qwen3-rerank"
+# 可选（Rerank 精排，智谱）
+RERANK_API_KEY = "你的智谱密钥"
+RERANK_MODEL = "rerank"
 ```
 
 ### 4. 等待部署完成
@@ -244,7 +246,7 @@ RERANK_MODEL = "qwen3-rerank"
 | Web 框架 | Streamlit | UI 与交互 |
 | LLM | OpenAI / DeepSeek / DashScope | 对话 / 自审 / PPT 大纲生成 |
 | Embedding | text-embedding-v3 | 向量化 |
-| Rerank | qwen3-rerank | 精排（可选） |
+| Rerank | rerank（智谱） | 精排（可选） |
 | PPT 处理 | python-pptx | PPT 生成 |
 | PPT 编辑 | hands-on-deck | PPT 增量修改 |
 | DOCX | python-docx | Word 生成与编辑 |

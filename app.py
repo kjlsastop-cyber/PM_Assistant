@@ -266,6 +266,53 @@ def _run_self_review(client, model_name: str, query: str,
         return None
 
 
+def _review_is_fail(review_text: str) -> bool:
+    """审查是否未通过：总体评级 fail，或任一维度评分 ≤2 分。"""
+    if not review_text:
+        return False
+    for line in review_text.split("\n"):
+        if "总体评级" in line and "fail" in line.lower():
+            return True
+    for m in re.finditer(r"(\d)\s*分", review_text):
+        if int(m.group(1)) <= 2:
+            return True
+    return False
+
+
+def _extract_review_feedback(review_text: str) -> str:
+    """提取审查中的「发现的问题」与「改进建议」，作为重新生成的反馈。"""
+    parts = []
+    for marker in ("【发现的问题】", "【改进建议】"):
+        m = re.search(re.escape(marker) + r"\s*\n(.*?)(?=\n【|\Z)", review_text, re.DOTALL)
+        if m:
+            parts.append(m.group(1).strip())
+    return "\n\n".join(p for p in parts if p) or review_text
+
+
+def _stream_reply(placeholder, client, model_name: str, messages: list) -> str:
+    """流式生成回复并写入 placeholder，返回完整文本。"""
+    stream = client.chat.completions.create(
+        model=model_name, messages=messages, stream=True
+    )
+    acc = ""
+    for chunk in stream:
+        if not chunk.choices:  # 跳过空 choices 的统计块，避免越界
+            continue
+        content = chunk.choices[0].delta.content
+        if content:  # 跳过空内容块，避免界面显示 None
+            acc += content
+            placeholder.markdown(acc)
+    return acc
+
+
+def _generate_reply(client, model_name: str, messages: list) -> str:
+    """非流式生成回复（用于低分重生成）。"""
+    resp = client.chat.completions.create(
+        model=model_name, messages=messages, stream=False
+    )
+    return (resp.choices[0].message.content or "").strip()
+
+
 def _extract_greeting(prompt_text: str) -> tuple[str, str]:
     """提取提示词文件内嵌的开场白（<!--GREETING ... GREETING-->），返回 (系统提示词, 开场白)。"""
     m = re.search(r"<!--GREETING\s*\n(.*?)\n\s*GREETING-->", prompt_text, re.DOTALL)
@@ -1713,23 +1760,8 @@ if submission and ((submission.text or "").strip() or submission.files):
 
     with st.chat_message("assistant", avatar=str(PENGUIN_IMG)):
         try:
-            stream = client.chat.completions.create(
-                model=model_name,
-                messages=messages_for_api,
-                stream=True,
-            )
-
-            def _content_stream():
-                for chunk in stream:
-                    if not chunk.choices:  # 跳过空 choices 的统计块，避免越界
-                        continue
-                    content = chunk.choices[0].delta.content
-                    if content:  # 跳过空内容块，避免界面显示 None
-                        yield content
-
-            reply = st.write_stream(_content_stream())
-            assistant_msg = {"role": "assistant", "display": reply, "content": reply}
-            messages.append(assistant_msg)
+            placeholder = st.empty()
+            reply = _stream_reply(placeholder, client, model_name, messages_for_api)
 
             # 5) 检索来源展示（可展开）
             if retrieval_hits:
@@ -1742,7 +1774,9 @@ if submission and ((submission.text or "").strip() or submission.files):
                         )
                         st.markdown(f"> {hit['text'][:200]}{'...' if len(hit['text']) > 200 else ''}")
 
-            # 6) Agent 自我审查（可展开）
+            # 6) Agent 自我审查 + 低分自动重新生成（最多 1 次）
+            review_result = None
+            regenerated = False
             if review_enabled and client is not None:
                 with st.spinner("🔍 Agent 自我审查中…"):
                     review_result = _run_self_review(
@@ -1753,25 +1787,49 @@ if submission and ((submission.text or "").strip() or submission.files):
                         upload_context=upload_text,
                         assistant_reply=reply,
                     )
-                if review_result:
-                    assistant_msg["review"] = review_result
-                    verdict = "warn"
-                    for line in review_result.split("\n"):
-                        if "总体评级" in line:
-                            if "pass" in line.lower():
-                                verdict = "pass"
-                            elif "fail" in line.lower():
-                                verdict = "fail"
-                            break
-                    verdict_icon = {"pass": "✅", "warn": "⚠️", "fail": "❌"}.get(verdict, "⚠️")
-                    verdict_label = {"pass": "通过", "warn": "注意", "fail": "不通过"}.get(verdict, "审查")
-                    with st.expander(
-                        f"{verdict_icon} 自我审查：{verdict_label}",
-                        expanded=(verdict == "fail"),
-                    ):
-                        st.markdown(review_result)
-                else:
-                    st.caption("🔍 自我审查：审查服务暂不可用，已跳过。")
+
+                if review_result and _review_is_fail(review_result):
+                    feedback = _extract_review_feedback(review_result)
+                    regen_messages = messages_for_api + [
+                        {"role": "assistant", "content": reply},
+                        {"role": "user",
+                         "content": f"你的上一条回复经审查未通过，存在以下问题，请据此修正后重新回答：\n{feedback}"},
+                    ]
+                    with st.spinner("⚠️ 审查未通过，正在重新生成…"):
+                        reply = _generate_reply(client, model_name, regen_messages)
+                        placeholder.markdown(reply)
+                        review_result = _run_self_review(
+                            client=client,
+                            model_name=model_name,
+                            query=user_input,
+                            kb_context=kb_section,
+                            upload_context=upload_text,
+                            assistant_reply=reply,
+                        )
+                    regenerated = True
+
+            assistant_msg = {"role": "assistant", "display": reply, "content": reply}
+            messages.append(assistant_msg)
+
+            if review_result:
+                assistant_msg["review"] = review_result
+                verdict = "warn"
+                for line in review_result.split("\n"):
+                    if "总体评级" in line:
+                        if "pass" in line.lower():
+                            verdict = "pass"
+                        elif "fail" in line.lower():
+                            verdict = "fail"
+                        break
+                verdict_icon = {"pass": "✅", "warn": "⚠️", "fail": "❌"}.get(verdict, "⚠️")
+                verdict_label = {"pass": "通过", "warn": "注意", "fail": "不通过"}.get(verdict, "审查")
+                title = f"{verdict_icon} 自我审查：{verdict_label}"
+                if regenerated:
+                    title += "（已自动重生成）"
+                with st.expander(title, expanded=(verdict == "fail")):
+                    st.markdown(review_result)
+            elif review_enabled and client is not None:
+                st.caption("🔍 自我审查：审查服务暂不可用，已跳过。")
         except Exception as e:  # 网络/鉴权/模型错误，保留会话可重试
             messages.pop()
             st.error(f"调用失败：{e}")

@@ -12,7 +12,6 @@ import re
 import struct
 import urllib.request
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from openai import OpenAI
 
@@ -24,6 +23,10 @@ TOP_K = int(os.getenv("KB_TOP_K", "4"))
 MIN_SCORE = float(os.getenv("KB_MIN_SCORE", "0.25"))
 EMBED_BATCH = int(os.getenv("EMBEDDING_BATCH_SIZE", "10"))
 RERANK_MODEL = os.getenv("RERANK_MODEL", "").strip()
+RERANK_API_KEY = os.getenv("RERANK_API_KEY", "").strip()
+RERANK_BASE_URL = os.getenv(
+    "RERANK_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/rerank"
+).strip()
 RERANK_CANDIDATES = int(os.getenv("RERANK_CANDIDATES", "20"))
 RRF_K = 60
 
@@ -255,28 +258,23 @@ def _bm25_scores(query_tokens, texts, cached_tokens=None, cached_df=None, cached
 
 
 def get_rerank_config():
-    """Rerank 与 Embedding 共用 EMBEDDING_API_KEY，返回 (url, api_key, model)，未配置返回 None。"""
-    api_key = os.getenv("EMBEDDING_API_KEY", "").strip()
-    if not api_key or not RERANK_MODEL:
+    """Rerank 独立使用 RERANK_API_KEY（智谱），返回 (url, api_key, model)，未配置返回 None。"""
+    if not RERANK_API_KEY or not RERANK_MODEL:
         return None
-    base = os.getenv(
-        "EMBEDDING_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    ).strip()
-    netloc = urlsplit(base).netloc or "dashscope.aliyuncs.com"
-    url = f"https://{netloc}/api/v1/services/rerank/text-rerank/text-rerank"
-    return url, api_key, RERANK_MODEL
+    return RERANK_BASE_URL, RERANK_API_KEY, RERANK_MODEL
 
 
 def _rerank(query: str, documents, top_n: int):
-    """调用 DashScope Rerank 接口，返回 [(原文档下标, 相关度)]；失败返回 None。"""
+    """调用智谱 Rerank 接口，返回 [(原文档下标, 相关度)]；失败返回 None。"""
     config = get_rerank_config()
     if config is None or not documents:
         return None
     url, api_key, model = config
     payload = {
         "model": model,
-        "input": {"query": query, "documents": list(documents)},
-        "parameters": {"top_n": top_n},
+        "query": query,
+        "documents": list(documents),
+        "top_n": top_n,
     }
     req = urllib.request.Request(
         url,
@@ -292,7 +290,7 @@ def _rerank(query: str, documents, top_n: int):
             data = json.loads(resp.read().decode("utf-8"))
     except Exception:
         return None
-    results = (data.get("output") or {}).get("results") or data.get("results") or []
+    results = data.get("results") or []
     if not results:
         return None
     return [(r["index"], r.get("relevance_score", 0.0)) for r in results]
