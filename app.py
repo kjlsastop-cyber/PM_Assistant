@@ -1413,14 +1413,18 @@ with st.sidebar:
 
     st.subheader("历史对话")
     if st.button("+ 新建话题", key="new_topic", type="tertiary", use_container_width=True):
-        cur = _new_topic()
-        topics.insert(0, cur)
-        st.session_state.cur_topic[chosen] = cur["id"]
-        _save_topics(store)
-        st.rerun()
+        if _is_empty(cur):
+            st.toast("当前已经是空话题，无需重复新建")
+        else:
+            cur = _new_topic()
+            topics.insert(0, cur)
+            st.session_state.cur_topic[chosen] = cur["id"]
+            _save_topics(store)
+            st.rerun()
 
     for t in topics:
         is_renaming = st.session_state.rename_topic_id == t["id"]
+        is_active = t["id"] == cur["id"]
         if is_renaming:
             new_title = st.text_input(
                 "重命名话题",
@@ -1439,15 +1443,14 @@ with st.sidebar:
                 if st.button("✕", key=f"rename_cancel_{t['id']}", type="tertiary"):
                     st.session_state.rename_topic_id = None
                     st.rerun()
-        else:
+        elif is_active:
+            # 当前话题：显示 切换 / 重命名 / 删除
             c1, c2, c3 = st.columns([6, 1, 1])
             with c1:
-                is_active = t["id"] == cur["id"]
-                label = f"{'🟢' if is_active else '💬'} {t['title']}"
                 if st.button(
-                    label,
+                    f"🟢 {t['title']}",
                     key=f"topic_{t['id']}",
-                    type="primary" if is_active else "secondary",
+                    type="primary",
                     use_container_width=True,
                 ):
                     st.session_state.cur_topic[chosen] = t["id"]
@@ -1471,6 +1474,16 @@ with st.sidebar:
                         st.session_state.rename_topic_id = None
                     _save_topics(store)
                     st.rerun()
+        else:
+            # 非当前话题：只显示标题，点击切换
+            if st.button(
+                f"💬 {t['title']}",
+                key=f"topic_{t['id']}",
+                type="secondary",
+                use_container_width=True,
+            ):
+                st.session_state.cur_topic[chosen] = t["id"]
+                st.rerun()
 
     # ---------- 大模型选择（须先于编辑模式，编辑功能依赖 client） ----------
     options = _model_options()
@@ -1499,73 +1512,73 @@ with st.sidebar:
         st.error("未配置任何大模型密钥：本地请编辑 .env；Streamlit Cloud 请在 Settings → Secrets 中配置后重启应用。")
 
     # ---------- 编辑模式（增量修改已有 PPT/DOCX，只输出副本） ----------
-    st.subheader("🛠️ 编辑已有文档")
-    edit_file = st.file_uploader(
-        "上传要编辑的 PPT/DOCX",
-        type=["pptx", "docx"],
-        key="edit_target",
-        help="上传后用自然语言描述修改需求，AI 生成 patch 增量编辑（永不覆盖源文件）",
-    )
-    edit_instruction = st.text_area(
-        "修改指令",
-        placeholder="例如：把「营销场景」改成「武警舆情」，在最后添加一页项目总结",
-        key="edit_instr",
-        height=80,
-    )
-
-    if edit_file is not None:
-        file_bytes = edit_file.read()
-        decision = detect_route("upload_file", edit_file.name, file_bytes)
-
-        for w in decision.warnings:
-            st.warning(w)
-        for bw in decision.boundary_warnings:
-            st.warning(bw)
-        if not decision.boundary_warnings:
-            st.caption("✅ 文件检测：未发现 SmartArt/动画/修订标记等复杂元素")
-
-        st.caption(f"🔀 路由：**{decision.route}** | 安全：**{decision.safety['output_mode']}**")
-
-        if decision.route == "edit_ppt" and edit_instruction and client is not None:
-            if st.button("🚀 执行 PPT 修改", key="exec_edit_ppt"):
-                with st.spinner("🔧 正在生成 patch 并应用到 PPT（约 10~60 秒）…"):
-                    patch = _instruction_to_patch(client, model_name, edit_instruction, file_bytes)
-                    if patch:
-                        result = _modify_pptx(file_bytes, patch,
-                                              client=client, model_name=model_name,
-                                              instruction=edit_instruction)
-                        if result:
-                            st.session_state.edited_bytes = result
-                            st.session_state.edited_name = f"edited_{edit_file.name}"
-                            st.success(f"✅ 修改成功！输出 {len(result)} bytes 副本")
-                        else:
-                            st.error("❌ hands-on-deck 执行失败，请检查 patch 格式")
-                            deck_err = st.session_state.get("last_deck_error")
-                            if deck_err:
-                                with st.expander("查看错误详情"):
-                                    st.code(deck_err, language="text")
-                    else:
-                        st.error("❌ 无法生成 patch 指令，请简化修改描述")
-
-        elif decision.route == "edit_docx":
-            if edit_instruction and st.button("🚀 执行 DOCX 修改", key="exec_edit_docx"):
-                with st.spinner("🔧 正在修改 DOCX…"):
-                    edited = _modify_docx(file_bytes, edit_instruction, client=client, model_name=model_name)
-                    if edited:
-                        st.session_state.edited_bytes = edited
-                        st.session_state.edited_name = f"edited_{edit_file.name}"
-                        st.success(f"✅ 修改成功！输出 {len(edited)} bytes 副本")
-                    else:
-                        st.error("❌ DOCX 修改失败")
-
-    if st.session_state.get("edited_bytes"):
-        st.download_button(
-            "⬇️ 下载编辑后的文件",
-            data=st.session_state["edited_bytes"],
-            file_name=st.session_state.get("edited_name", "edited_output.bin"),
-            mime="application/octet-stream",
-            key="edited_dl",
+    with st.expander("🛠️ 编辑已有文档", expanded=False):
+        edit_file = st.file_uploader(
+            "上传要编辑的 PPT/DOCX",
+            type=["pptx", "docx"],
+            key="edit_target",
+            help="上传后用自然语言描述修改需求，AI 生成 patch 增量编辑（永不覆盖源文件）",
         )
+        edit_instruction = st.text_area(
+            "修改指令",
+            placeholder="例如：把「营销场景」改成「武警舆情」，在最后添加一页项目总结",
+            key="edit_instr",
+            height=80,
+        )
+
+        if edit_file is not None:
+            file_bytes = edit_file.read()
+            decision = detect_route("upload_file", edit_file.name, file_bytes)
+
+            for w in decision.warnings:
+                st.warning(w)
+            for bw in decision.boundary_warnings:
+                st.warning(bw)
+            if not decision.boundary_warnings:
+                st.caption("✅ 文件检测：未发现 SmartArt/动画/修订标记等复杂元素")
+
+            st.caption(f"🔀 路由：**{decision.route}** | 安全：**{decision.safety['output_mode']}**")
+
+            if decision.route == "edit_ppt" and edit_instruction and client is not None:
+                if st.button("🚀 执行 PPT 修改", key="exec_edit_ppt"):
+                    with st.spinner("🔧 正在生成 patch 并应用到 PPT（约 10~60 秒）…"):
+                        patch = _instruction_to_patch(client, model_name, edit_instruction, file_bytes)
+                        if patch:
+                            result = _modify_pptx(file_bytes, patch,
+                                                  client=client, model_name=model_name,
+                                                  instruction=edit_instruction)
+                            if result:
+                                st.session_state.edited_bytes = result
+                                st.session_state.edited_name = f"edited_{edit_file.name}"
+                                st.success(f"✅ 修改成功！输出 {len(result)} bytes 副本")
+                            else:
+                                st.error("❌ hands-on-deck 执行失败，请检查 patch 格式")
+                                deck_err = st.session_state.get("last_deck_error")
+                                if deck_err:
+                                    with st.expander("查看错误详情"):
+                                        st.code(deck_err, language="text")
+                        else:
+                            st.error("❌ 无法生成 patch 指令，请简化修改描述")
+
+            elif decision.route == "edit_docx":
+                if edit_instruction and st.button("🚀 执行 DOCX 修改", key="exec_edit_docx"):
+                    with st.spinner("🔧 正在修改 DOCX…"):
+                        edited = _modify_docx(file_bytes, edit_instruction, client=client, model_name=model_name)
+                        if edited:
+                            st.session_state.edited_bytes = edited
+                            st.session_state.edited_name = f"edited_{edit_file.name}"
+                            st.success(f"✅ 修改成功！输出 {len(edited)} bytes 副本")
+                        else:
+                            st.error("❌ DOCX 修改失败")
+
+        if st.session_state.get("edited_bytes"):
+            st.download_button(
+                "⬇️ 下载编辑后的文件",
+                data=st.session_state["edited_bytes"],
+                file_name=st.session_state.get("edited_name", "edited_output.bin"),
+                mime="application/octet-stream",
+                key="edited_dl",
+            )
 
     with st.expander("Agent 自我审查", expanded=False):
         review_enabled = st.toggle(
