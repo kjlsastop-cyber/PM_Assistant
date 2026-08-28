@@ -38,7 +38,7 @@ MAX_HISTORY_ROUNDS = int(os.getenv("MAX_HISTORY_ROUNDS", "10"))  # 历史对话�
 MAX_HISTORY_CHARS = int(os.getenv("MAX_HISTORY_CHARS", "8000"))  # 历史对话最大字符数
 HISTORY_FILE = BASE_DIR / "history_topics.json"  # 历史话题本地持久化
 REVIEW_ENABLED = os.getenv("REVIEW_ENABLED", "true").strip().lower() == "true"
-REVIEW_MODEL = os.getenv("REVIEWER_MODEL", "").strip()  # 留空则复用当前对话模型
+REVIEW_MODEL = os.getenv("REVIEWER_MODEL", "").strip()  # 留空则与当前对话模型错开（互审）
 REVIEW_TEMP = float(os.getenv("REVIEW_TEMPERATURE", "0.3"))  # 审查温度，低温度确保审查稳定
 
 
@@ -70,6 +70,14 @@ def _model_options():
 @st.cache_resource
 def get_client(api_key: str, base_url: str):
     return OpenAI(api_key=api_key, base_url=base_url)
+
+
+def _pick_opposite_model(label: str, options: dict):
+    """返回与当前模型对立的模型配置 (api_key, base_url, model_name)，用于互审。"""
+    for lbl, cfg in options.items():
+        if lbl != label:
+            return cfg
+    return None
 
 
 @st.cache_resource
@@ -254,7 +262,7 @@ def _run_self_review(client, model_name: str, query: str,
     )
     try:
         resp = client.chat.completions.create(
-            model=REVIEW_MODEL or model_name,
+            model=model_name,
             temperature=REVIEW_TEMP,
             messages=[
                 {"role": "system", "content": reviewer_system},
@@ -1474,9 +1482,20 @@ with st.sidebar:
         api_key, base_url, model_name = options[label]
         client = get_client(api_key, base_url)
         st.caption(f"当前模型：{model_name}")
+        # 审查模型：默认与当前模型错开（DeepSeek↔通义千问 互审）；REVIEW_MODEL 手动指定时优先
+        review_client = client
+        review_model_name = REVIEW_MODEL or model_name
+        if not REVIEW_MODEL:
+            other = _pick_opposite_model(label, options)
+            if other is not None:
+                r_key, r_base, r_model = other
+                review_client = get_client(r_key, r_base)
+                review_model_name = r_model
     else:
         client = None
         model_name = None
+        review_client = None
+        review_model_name = None
         st.error("未配置任何大模型密钥：本地请编辑 .env；Streamlit Cloud 请在 Settings → Secrets 中配置后重启应用。")
 
     # ---------- 编辑模式（增量修改已有 PPT/DOCX，只输出副本） ----------
@@ -1555,7 +1574,7 @@ with st.sidebar:
             help="每次回复后自动进行质量审查（准确性/完整性/合规性等），审查结果可展开查看",
         )
         if review_enabled:
-            review_model_label = REVIEW_MODEL or "复用当前对话模型"
+            review_model_label = REVIEW_MODEL or review_model_name or "复用当前对话模型"
             st.caption(f"审查模型：{review_model_label} | 温度：{REVIEW_TEMP}")
 
     with st.expander("PPT 模板（可选）", expanded=False):
@@ -1780,8 +1799,8 @@ if submission and ((submission.text or "").strip() or submission.files):
             if review_enabled and client is not None:
                 with st.spinner("🔍 Agent 自我审查中…"):
                     review_result = _run_self_review(
-                        client=client,
-                        model_name=model_name,
+                        client=review_client,
+                        model_name=review_model_name,
                         query=user_input,
                         kb_context=kb_section,
                         upload_context=upload_text,
@@ -1799,8 +1818,8 @@ if submission and ((submission.text or "").strip() or submission.files):
                         reply = _generate_reply(client, model_name, regen_messages)
                         placeholder.markdown(reply)
                         review_result = _run_self_review(
-                            client=client,
-                            model_name=model_name,
+                            client=review_client,
+                            model_name=review_model_name,
                             query=user_input,
                             kb_context=kb_section,
                             upload_context=upload_text,
