@@ -469,8 +469,14 @@ def _dup_slide(prs, index: int):
         spTree.remove(child)
 
     # 复制关联关系（图片/超链接等），建立 rId 映射
+    # 注意：跳过 notesSlide 关系——notes 与 slide 必须一对一，
+    # 共享同一 notes 部件会导致 PowerPoint 校验失败无法打开文件；
+    # 新页的备注由 slide.notes_slide 按需创建独立部件。
+    notes_reltype = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide"
     rel_map = {}
     for rId, rel in template.part.rels.items():
+        if rel.reltype == notes_reltype:
+            continue
         try:
             if rel.is_external:
                 rel_map[rId] = new_slide.part.relate_to(
