@@ -1,4 +1,4 @@
-# PM_assident (PM Assistant)
+# PM_Assistant (PM Assistant)
 
 <div align="center">
 
