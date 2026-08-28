@@ -453,36 +453,36 @@ def _build_pptx_from_template(outline: dict, source_title: str, template_bytes: 
     return buf.getvalue()
 
 
-def _dup_slide(prs, index: int):
-    """深拷贝模板幻灯片（含图片等关联部件），保留全部视觉设计。"""
+def _clone_slide_visuals(src_slide, dest_slide):
+    """把 src_slide 的形状与页级背景深拷贝到 dest_slide（保留视觉设计）。
+
+    复制关系时跳过 notesSlide——notes 与 slide 必须一对一，共享同一 notes
+    部件会导致 PowerPoint 校验失败无法打开文件；新页备注由 slide.notes_slide
+    按需创建独立部件。
+    """
     import copy
     from pptx.oxml.ns import qn
 
-    template = prs.slides[index]
-    new_slide = prs.slides.add_slide(template.slide_layout)
+    notes_reltype = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide"
 
-    # 清空新页默认形状（只保留组属性节点）
-    spTree = new_slide.shapes._spTree
+    # 清空目标页默认形状（只保留组属性节点）
+    spTree = dest_slide.shapes._spTree
     for child in list(spTree):
         if child.tag.endswith('}nvGrpSpPr') or child.tag.endswith('}grpSpPr'):
             continue
         spTree.remove(child)
 
     # 复制关联关系（图片/超链接等），建立 rId 映射
-    # 注意：跳过 notesSlide 关系——notes 与 slide 必须一对一，
-    # 共享同一 notes 部件会导致 PowerPoint 校验失败无法打开文件；
-    # 新页的备注由 slide.notes_slide 按需创建独立部件。
-    notes_reltype = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide"
     rel_map = {}
-    for rId, rel in template.part.rels.items():
+    for rId, rel in src_slide.part.rels.items():
         if rel.reltype == notes_reltype:
             continue
         try:
             if rel.is_external:
-                rel_map[rId] = new_slide.part.relate_to(
+                rel_map[rId] = dest_slide.part.relate_to(
                     rel.target_ref, rel.reltype, is_external=True)
             else:
-                rel_map[rId] = new_slide.part.relate_to(rel.target_part, rel.reltype)
+                rel_map[rId] = dest_slide.part.relate_to(rel.target_part, rel.reltype)
         except Exception:
             pass
 
@@ -494,7 +494,7 @@ def _dup_slide(prs, index: int):
                     node.set(attr, rel_map[v])
 
     # 复制形状元素
-    src_spTree = template.shapes._spTree
+    src_spTree = src_slide.shapes._spTree
     for child in list(src_spTree):
         if child.tag.endswith('}nvGrpSpPr') or child.tag.endswith('}grpSpPr'):
             continue
@@ -503,12 +503,18 @@ def _dup_slide(prs, index: int):
         spTree.append(el)
 
     # 复制页级背景（如有）
-    bg = template._element.find(qn('p:bg'))
+    bg = src_slide._element.find(qn('p:bg'))
     if bg is not None:
         el = copy.deepcopy(bg)
         _remap(el)
-        new_slide._element.insert(0, el)
+        dest_slide._element.insert(0, el)
 
+
+def _dup_slide(prs, index: int):
+    """深拷贝模板幻灯片（含图片等关联部件），保留全部视觉设计。"""
+    template = prs.slides[index]
+    new_slide = prs.slides.add_slide(template.slide_layout)
+    _clone_slide_visuals(template, new_slide)
     return new_slide
 
 
@@ -992,9 +998,19 @@ def _post_process_new_slides(pptx_bytes: bytes, client, model_name, instruction:
     if not blank_indices:
         return pptx_bytes
 
-    # 用 LLM 为每个空白页生成内容
+    # 样式源页：最后一张非空白页（add-slide 追加在末尾，前面都是原页）
+    style_slide = None
+    for i in range(slide_count - 1, -1, -1):
+        if i not in blank_indices:
+            style_slide = prs.slides[i]
+            break
+
+    # 用 LLM 为每个空白页生成内容；先复制原页样式再填充，避免纯空白页
     for idx in blank_indices:
         slide = prs.slides[idx]
+        if style_slide is not None:
+            _clone_slide_visuals(style_slide, slide)
+            _clear_slide_text(slide)
         content = _llm_generate_slide_content(client, model_name, instruction, idx + 1, len(blank_indices))
         _fill_slide_content(slide, content)
 
@@ -1053,84 +1069,82 @@ def _llm_generate_slide_content(client, model_name, instruction: str,
         return {"title": f"新增页面 {slide_num}", "bullets": ["内容待补充"]}
 
 
-def _fill_slide_content(slide, content: dict):
-    """用 python-pptx 将内容填充到幻灯片。
+def _clear_slide_text(slide):
+    """清空幻灯片所有文本框的文本，保留形状与字体样式。"""
+    from pptx.oxml.ns import qn
 
-    优先使用占位符（placeholder），否则创建文本框。
-    """
-    from pptx.util import Inches, Pt, Emu
-    from pptx.enum.text import PP_ALIGN
+    for shape in slide.shapes:
+        if not shape.has_text_frame:
+            continue
+        for t in shape.text_frame._txBody.iter(qn('a:t')):
+            t.text = ""
 
-    title_text = content.get("title", "")
-    bullets = content.get("bullets", [])
-    subtitle = content.get("subtitle", "")
 
-    # 查找标题占位符
-    title_ph = None
-    body_ph = None
+def _find_title_body(slide):
+    """定位标题框与正文框：优先占位符，否则按位置启发式。"""
+    title_shape = None
+    body_shape = None
     for shape in slide.placeholders:
-        if shape.placeholder_format.idx == 0:  # 标题占位符
-            title_ph = shape
-        elif shape.placeholder_format.idx == 1:  # 正文占位符
-            body_ph = shape
+        try:
+            idx = shape.placeholder_format.idx
+        except Exception:
+            continue
+        if idx == 0:
+            title_shape = shape
+        elif idx == 1:
+            body_shape = shape
+    if title_shape is not None and body_shape is not None:
+        return title_shape, body_shape
 
-    # 填充标题
-    if title_ph is not None:
-        tf = title_ph.text_frame
-        tf.clear()
-        p = tf.paragraphs[0]
-        run = p.add_run()
-        run.text = title_text
-        run.font.size = Pt(36)
-        run.font.bold = True
-    else:
-        # 新建标题文本框（16:9 画布 13.33 x 7.5 英寸）
-        txBox = slide.shapes.add_textbox(Inches(0.8), Inches(0.6), Inches(11.7), Inches(1.2))
-        tf = txBox.text_frame
-        tf.word_wrap = True
-        p = tf.paragraphs[0]
-        run = p.add_run()
-        run.text = title_text
-        run.font.size = Pt(36)
-        run.font.bold = True
+    text_shapes = [sh for sh in slide.shapes if sh.has_text_frame]
+    if not text_shapes:
+        return None, None
+    # 标题：垂直位置最高（top 最小）的文本框；正文：剩余里面积最大
+    text_shapes.sort(key=lambda sh: (sh.top if sh.top is not None else 0))
+    title_shape = text_shapes[0]
+    rest = text_shapes[1:]
+    body_shape = None
+    if rest:
+        body_shape = max(rest, key=lambda sh: ((sh.width or 0) * (sh.height or 0)))
+    return title_shape, body_shape
 
-    # 填充副标题
+
+def _fill_slide_content(slide, content: dict):
+    """将内容填充到幻灯片，尽量复用已有文本框（保留原 PPT 的字体/字号/颜色）。
+
+    克隆样式页后的空白页会带上原页文本框，这里复用它们而非新建，从而继承原样式。
+    """
+    from pptx.util import Inches
+
+    title_text = str(content.get("title") or "").strip()
+    bullets = [str(b).strip() for b in (content.get("bullets") or []) if str(b).strip()]
+    subtitle = str(content.get("subtitle") or "").strip()
+
+    title_shape, body_shape = _find_title_body(slide)
+
+    # 标题
+    if title_text:
+        if title_shape is not None:
+            _set_tf_text(title_shape.text_frame, title_text)
+        else:
+            txBox = slide.shapes.add_textbox(Inches(0.8), Inches(0.6), Inches(11.7), Inches(1.2))
+            txBox.text_frame.word_wrap = True
+            _set_tf_text(txBox.text_frame, title_text)
+
+    # 副标题
     if subtitle:
         txBox = slide.shapes.add_textbox(Inches(0.8), Inches(1.9), Inches(11.7), Inches(0.6))
-        tf = txBox.text_frame
-        p = tf.paragraphs[0]
-        run = p.add_run()
-        run.text = subtitle
-        run.font.size = Pt(20)
-        run.font.italic = True
+        txBox.text_frame.word_wrap = True
+        _set_tf_text(txBox.text_frame, subtitle)
 
-    # 填充正文要点
+    # 正文要点
     if bullets:
-        if body_ph is not None:
-            tf = body_ph.text_frame
-            tf.clear()
-            for i, bullet in enumerate(bullets):
-                if i == 0:
-                    p = tf.paragraphs[0]
-                else:
-                    p = tf.add_paragraph()
-                run = p.add_run()
-                run.text = f"• {bullet}"
-                run.font.size = Pt(18)
+        if body_shape is not None:
+            _set_tf_lines(body_shape.text_frame, bullets)
         else:
-            # 新建正文文本框（16:9 画布 13.33 x 7.5 英寸）
             txBox = slide.shapes.add_textbox(Inches(0.8), Inches(2.6), Inches(11.7), Inches(4.3))
-            tf = txBox.text_frame
-            tf.word_wrap = True
-            for i, bullet in enumerate(bullets):
-                if i == 0:
-                    p = tf.paragraphs[0]
-                else:
-                    p = tf.add_paragraph()
-                run = p.add_run()
-                run.text = f"• {bullet}"
-                run.font.size = Pt(18)
-                p.space_after = Pt(12)
+            txBox.text_frame.word_wrap = True
+            _set_tf_lines(txBox.text_frame, bullets)
 
 
 def _modify_docx(docx_bytes: bytes, instruction: str, client=None, model_name=None) -> bytes | None:
