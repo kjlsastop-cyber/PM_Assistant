@@ -180,6 +180,45 @@ def database_available(force: bool = False) -> bool:
     return _available_cache
 
 
+def database_diagnose() -> dict:
+    """返回当前数据库配置与连接的详细诊断（供 UI 显示）。"""
+    diag: dict = {
+        "env_DATABASE_URL": bool(os.environ.get("DATABASE_URL", "").strip()),
+        "env_DB_HOST": bool(os.environ.get("DB_HOST", "").strip()),
+        "st_secrets_DATABASE_URL": False,
+        "st_secrets_DB_HOST": False,
+        "url_built": False,
+        "engine_ok": False,
+        "connect_ok": False,
+        "last_error": "",
+    }
+    # st.secrets 路径
+    try:
+        import streamlit as st
+        diag["st_secrets_DATABASE_URL"] = bool((st.secrets.get("DATABASE_URL") or "").strip())
+        diag["st_secrets_DB_HOST"] = bool((st.secrets.get("DB_HOST") or "").strip())
+    except Exception as e:
+        diag["st_secrets_error"] = f"{type(e).__name__}: {e}"
+    # 构建 URL
+    url = _build_database_url()
+    diag["url_built"] = bool(url)
+    if url:
+        diag["url_preview"] = url.replace("***", "***")[:80] + ("..." if len(url) > 80 else "")
+    # 引擎
+    engine = get_engine()
+    diag["engine_ok"] = engine is not None
+    # 连接
+    if engine is not None:
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            diag["connect_ok"] = True
+        except Exception as e:
+            diag["connect_ok"] = False
+            diag["last_error"] = f"{type(e).__name__}: {e}"
+    return diag
+
+
 def init_db() -> bool:
     """按模型创建缺失的表（幂等）。成功 True，未配置/失败 False。"""
     engine = get_engine()

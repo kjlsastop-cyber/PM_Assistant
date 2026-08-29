@@ -49,6 +49,41 @@ def current_project_id() -> Optional[str]:
     return st.session_state.get("pm_project_id")
 
 
+def _show_db_diagnose():
+    """在数据库不可用时展示详细诊断面板，帮助用户在 Cloud 上快速定位问题。"""
+    diag = pm.database_diagnose()
+    st.markdown("**🔧 诊断面板**")
+    rows = [
+        ("os.environ.DATABASE_URL", "✅" if diag["env_DATABASE_URL"] else "❌"),
+        ("os.environ.DB_HOST", "✅" if diag["env_DB_HOST"] else "❌"),
+        ("st.secrets.DATABASE_URL", "✅" if diag["st_secrets_DATABASE_URL"] else "❌"),
+        ("st.secrets.DB_HOST", "✅" if diag["st_secrets_DB_HOST"] else "❌"),
+        ("构建连接 URL", "✅" if diag["url_built"] else "❌"),
+        ("SQLAlchemy Engine", "✅" if diag["engine_ok"] else "❌"),
+        ("SELECT 1 连通", "✅" if diag["connect_ok"] else "❌"),
+    ]
+    for name, status in rows:
+        st.caption(f"{status} `{name}`")
+    if diag.get("url_preview"):
+        st.caption(f"URL 预览：`{diag['url_preview']}`")
+    if diag.get("last_error"):
+        st.error(f"连接错误：`{diag['last_error']}`")
+    if diag.get("st_secrets_error"):
+        st.caption(f"st.secrets 异常：`{diag['st_secrets_error']}`")
+
+    with st.expander("📖 修复指引", expanded=False):
+        st.markdown("""
+        **在 Streamlit Cloud 上配置 Supabase 数据库**：
+        1. 打开你的 App → `⋮` → **Settings** → **Secrets**
+        2. 粘贴以下 TOML（密码已替换）：
+        ```toml
+        DATABASE_URL = "postgresql://postgres:<你的密码>@db.kbelbsnnxwawfrrwjczq.supabase.co:5432/postgres?sslmode=require"
+        ```
+        3. 保存后**必须 Reboot app**（不是 Rerun）才能让 Secrets 注入生效
+        4. 如果用 Supabase Transaction Pooler，把 host 换成 `aws-0-xx.pooler.supabase.com`，端口 `6543`
+        """)
+
+
 # ---------- 侧边栏：项目记忆 ----------
 def render_sidebar_section(knowledge_base, client=None, model_name: Optional[str] = None):
     """侧边栏「项目记忆」区：数据库状态 + 项目创建/选择 + 文档选择 + 提取按钮。
@@ -58,7 +93,8 @@ def render_sidebar_section(knowledge_base, client=None, model_name: Optional[str
     with st.expander("🗂️ 项目记忆（Supabase）", expanded=False):
         if not pm.database_available():
             st.caption("🗄️ 数据库未连接，项目记忆暂不可用（不影响聊天与知识库）。")
-            st.caption("请在 .env 配置 DATABASE_URL 或 DB_* 后重启。")
+            # ---------- 诊断信息 ----------
+            _show_db_diagnose()
             return
 
         # ---- 项目创建 / 选择（第一版：单项目） ----
