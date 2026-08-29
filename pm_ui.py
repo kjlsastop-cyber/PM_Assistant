@@ -67,20 +67,28 @@ def _show_db_diagnose():
     if diag.get("url_preview"):
         st.caption(f"URL 预览：`{diag['url_preview']}`")
     if diag.get("last_error"):
-        st.error(f"连接错误：`{diag['last_error']}`")
+        st.caption("连接错误（完整）：")
+        st.code(diag["last_error"], language=None)
     if diag.get("st_secrets_error"):
         st.caption(f"st.secrets 异常：`{diag['st_secrets_error']}`")
 
     with st.expander("📖 修复指引", expanded=False):
         st.markdown("""
-        **在 Streamlit Cloud 上配置 Supabase 数据库**：
-        1. 打开你的 App → `⋮` → **Settings** → **Secrets**
-        2. 粘贴以下 TOML（密码已替换）：
-        ```toml
-        DATABASE_URL = "postgresql://postgres:<你的密码>@db.kbelbsnnxwawfrrwjczq.supabase.co:5432/postgres?sslmode=require"
-        ```
-        3. 保存后**必须 Reboot app**（不是 Rerun）才能让 Secrets 注入生效
-        4. 如果用 Supabase Transaction Pooler，把 host 换成 `aws-0-xx.pooler.supabase.com`，端口 `6543`
+        **常见错误与对应解法**：
+
+        1. `failed to resolve host 'db.xxx.supabase.co'`（DNS 解析失败）
+           → Streamlit Cloud 容器无 IPv6，直连域名解析不了。
+           → **改用 Supabase Pooler 连接串**（IPv4）：
+             - 打开 Supabase 后台 → **Project Settings → Database**
+             - 找到 **Connection string** 区域，选 **Transaction** 模式
+             - 复制 `postgresql://postgres.<项目ID>:<密码>@aws-0-<区域>.pooler.supabase.com:6543/postgres`
+             - 粘贴到 Streamlit Cloud 的 Settings → Secrets：
+               `DATABASE_URL = "上面复制的串"`
+             - 保存后 **Reboot app**
+
+        2. `password authentication failed` → 密码不对，重新复制
+
+        3. `ssl` 相关错误 → 代码已强制 sslmode=require，一般不会再出现
         """)
 
 

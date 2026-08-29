@@ -123,8 +123,9 @@ def get_engine() -> Optional[Engine]:
             pool_pre_ping=True,          # 取连接前先 ping，避免拿到失效连接
             pool_recycle=1800,           # 定期回收，规避 Supabase 连接空闲超时
             connect_args={
-                "connect_timeout": 10,
+                "connect_timeout": 30,    # 跨境连接放宽超时
                 "sslmode": "require",     # Supabase 强制 SSL
+                "prepare_threshold": 0,   # Pooler(pgbouncer) 不支持 prepared statements
             },
         )
     except Exception:
