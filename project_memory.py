@@ -116,12 +116,16 @@ def get_engine() -> Optional[Engine]:
     url = _build_database_url()
     if not url:
         return None
+    # 无条件强制 SSL —— Supabase 云端必须走 SSL
     try:
         _engine = create_engine(
             url,
             pool_pre_ping=True,          # 取连接前先 ping，避免拿到失效连接
             pool_recycle=1800,           # 定期回收，规避 Supabase 连接空闲超时
-            connect_args={"connect_timeout": 10},
+            connect_args={
+                "connect_timeout": 10,
+                "sslmode": "require",     # Supabase 强制 SSL
+            },
         )
     except Exception:
         _engine = None
