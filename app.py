@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 import kb
+import pm_ui
 from skill_router import detect_route, should_generate, should_edit, is_copy_only
 
 BASE_DIR = Path(__file__).parent
@@ -1606,6 +1607,9 @@ with st.sidebar:
                 del st.session_state["_ppt_template_key"]
                 st.rerun()
 
+    # ---------- 项目记忆（Supabase 持久化，独立模块 pm_ui） ----------
+    pm_ui.render_sidebar_section(knowledge_base, client=client, model_name=model_name)
+
     with st.expander("知识库（智能检索）", expanded=False):
         embedding_ready = kb.get_embedding_client() is not None
         if not embedding_ready:
@@ -1624,6 +1628,7 @@ with st.sidebar:
                 with st.spinner(f"正在将 {kb_file.name} 加入知识库…"):
                     try:
                         text = extract_text(kb_file)
+                        pm_ui.remember_doc_text(kb_file.name, text)  # 供「项目记忆」提取项目状态
                         n = knowledge_base.add_document(kb_file.name, text)
                         st.session_state[done_key] = (
                             "success",
@@ -1646,6 +1651,11 @@ with st.sidebar:
                 knowledge_base.clear()
                 _get_kb.clear()
                 st.rerun()
+
+# ---------- 项目记忆：抽取结果预览（待确认）+ 项目状态快照 ----------
+# 放在侧边栏之后执行，确保 pm_project_id 已是最新选中值；渲染位置仍在欢迎卡片与聊天记录之间
+pm_ui.render_pending_review()
+pm_ui.render_project_status()
 
 # ---------- 历史消息 ----------
 for msg in messages:

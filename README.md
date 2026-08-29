@@ -16,9 +16,28 @@
 ## 🌟 技术亮点
 
 🔀 **混合检索**：Embedding 向量 + BM25 关键词 → RRF 融合 → Rerank 重排，三层漏斗保障召回质量
+🧠 **Project Memory**：LLM 从会议纪要/周报抽取结构化事实（决策/任务/风险/事件），人工确认后写入 Supabase PostgreSQL，项目状态跨会话持久化
 🛡️ **Agent 自审**：与当前对话模型错开的 Reviewer 做五维度质量审查（准确性/完整性/来源/合规/逻辑），DeepSeek↔通义千问互审，人机协同闭环
 📝 **自然语言编辑文档**：LLM 生成 patch → 增量应用，永远输出副本不覆盖源文件，带 SmartArt/修订标记边界检测
 🎨 **模板化 PPT 生成**：复制模板页保留视觉设计，AI 提炼大纲后按特征填充，含演讲备注
+
+---
+
+## 🧠 双记忆架构：RAG Knowledge vs Project Memory
+
+本项目的核心设计是**两套职责完全不同的记忆系统**，这是本版本最大的产品升级：
+
+| 维度 | 📚 RAG Knowledge（知识库） | 🧠 Project Memory（项目记忆） |
+|------|---------------------------|------------------------------|
+| **保存什么** | 原始文档知识与证据（PRD、规范、调研资料原文） | 当前项目状态与结构化事实（决策/任务/风险/事件） |
+| **数据形态** | 非结构化文本分块 + 向量 | 结构化关系型数据（5 张表） |
+| **回答什么问题** | "规范里 SM4 的要求是什么？"（知识查询） | "项目现在卡在哪？上周定了什么？"（状态查询） |
+| **存储位置** | 本地 JSON（`kb_store_*.json`） | Supabase PostgreSQL（云端） |
+| **写入方式** | 上传文档自动入库 | LLM 抽取 → **人工确认** → 入库 |
+| **读取方式** | 向量+BM25 混合检索注入对话上下文 | 项目快照（当前/阻塞/已完成任务、决策、风险、事件） |
+| **模块** | `kb.py` | `project_memory.py` + `fact_extractor.py` + `pm_ui.py` |
+
+**一句话总结**：RAG Knowledge 让助手"知道更多"，Project Memory 让助手"记得项目进展"。
 
 ---
 
@@ -35,6 +54,13 @@
 - **智能分块**：结构感知分块，按 Markdown 标题、章节、段落智能切分
 - **混合检索**：向量语义检索 + BM25 关键词检索 → RRF 融合 → Rerank 精排
 - **独立存储**：每个助手拥有独立的知识库存储文件
+
+### 🧠 项目状态记忆（Project Memory）
+- **事实抽取**：上传会议纪要/周报后，LLM 自动抽取决策、任务、风险、事件四类结构化事实
+- **人工确认入库**：抽取结果先在界面预览检查，用户确认后才写入 Supabase，杜绝误入库
+- **项目快照**：随时查看当前任务、阻塞任务、已完成任务、最新决策、未关闭风险、最近事件
+- **云端持久化**：Supabase PostgreSQL 存储，项目状态跨会话、跨设备不丢失
+- **异常降级**：数据库不可用时仅提示错误，聊天与 RAG 功能完全不受影响
 
 ### 📊 文档产出
 - **生成 PPT**：将对话内容自动提炼为演示大纲（封面/章节/内容/结尾），套用模板生成 `.pptx`
@@ -57,6 +83,10 @@ PM_assident/
 ├── app.py                 # Streamlit 主程序 (Web UI + 对话逻辑)
 ├── kb.py                  # 知识库引擎 (分块/向量化/混合检索/Rerank)
 ├── skill_router.py        # 路由判定层 (生成链路 vs 编辑链路)
+├── project_memory.py      # 项目记忆数据库层 (SQLAlchemy + Supabase, 5 张表 CRUD)
+├── fact_extractor.py      # 事实抽取器 (LLM 抽取决策/任务/风险/事件 + 写入)
+├── pm_ui.py               # 项目记忆 UI 层 (侧边栏/预览确认/项目快照)
+├── test_project_memory.py # Project Memory MVP 闭环测试脚本
 ├── pm_agent.py            # CLI 版工具 (已弃用，保留命令行能力)
 ├── requirements.txt       # Python 依赖清单
 ├── .env.example           # 密钥配置模板
@@ -66,6 +96,9 @@ PM_assident/
 │   ├── reviewer.md        #   审查员提示词 (Agent 自审)
 │   ├── 产品经理助手.md    #   产品经理助手 System Prompt
 │   └── 药监局项目助手.md  #   药监局项目助手 System Prompt
+│
+├── sql/
+│   └── init_project_memory.sql  # 数据库初始化 SQL (5 张表 + 索引)
 │
 ├── assets/                # 静态资源
 │   ├── penguin.jpg        #   企鹅形象 (UI 主题)
@@ -87,6 +120,62 @@ PM_assident/
 │
 └── .streamlit/config.toml # Streamlit 配置
 ```
+
+---
+
+## 🏗️ 架构图
+
+```mermaid
+flowchart TB
+    subgraph UI["Streamlit 界面层"]
+        APP[app.py<br/>主程序编排]
+        PMUI[pm_ui.py<br/>项目记忆 UI]
+    end
+
+    subgraph LLM["大模型层"]
+        CHAT[对话/自审/PPT大纲]
+        FE[fact_extractor.py<br/>事实抽取]
+    end
+
+    subgraph RAG["RAG Knowledge（知识记忆）"]
+        KB[kb.py<br/>分块/嵌入/混合检索]
+        KBS[(kb_store_*.json<br/>本地 JSON)]
+    end
+
+    subgraph PM["Project Memory（项目状态记忆）"]
+        PMLIB[project_memory.py<br/>SQLAlchemy CRUD]
+        DB[(Supabase PostgreSQL<br/>projects/tasks/decisions<br/>/risks/events)]
+    end
+
+    DOC[上传文档<br/>会议纪要/周报/PRD]
+
+    DOC -->|自动入库| KB --> KBS
+    KB -->|检索注入| CHAT
+
+    DOC -->|提取项目状态| FE
+    FE -->|抽取结果预览| PMUI
+    PMUI -->|人工确认写入| PMLIB --> DB
+    PMUI -->|读取快照| PMLIB
+    APP --> PMUI
+    APP --> KB
+    APP --> CHAT
+```
+
+### Project Memory 数据流
+
+```mermaid
+flowchart LR
+    A[上传会议纪要/周报] --> B[知识库入库<br/>RAG Knowledge]
+    A --> C[点击「提取项目状态」]
+    C --> D[LLM 抽取<br/>decisions/tasks/risks/events]
+    D --> E[界面预览<br/>用户检查]
+    E -->|确认写入| F[save_facts 写入<br/>Supabase]
+    E -->|丢弃| G[不写库]
+    F --> H[项目快照<br/>get_project_snapshot]
+    H --> I[📋 项目状态区展示<br/>当前/阻塞/已完成任务<br/>决策/风险/事件]
+```
+
+**关键设计：抽取 ≠ 写库**。LLM 抽取结果先存入会话状态展示给用户，只有点击「确认写入项目记忆」才真正写入数据库，保证数据质量。
 
 ---
 
@@ -129,6 +218,22 @@ EMBEDDING_MODEL=text-embedding-v3
 RERANK_API_KEY=你的智谱密钥
 RERANK_MODEL=rerank
 ```
+
+**可选：Project Memory（Supabase PostgreSQL）**
+```bash
+# 方式A：完整连接串（推荐，Supabase 后台 → Project Settings → Database → Connection string）
+DATABASE_URL=postgresql://postgres.项目ID:密码@aws-0-区域.pooler.supabase.com:6543/postgres
+
+# 方式B：分项配置
+DB_HOST=db.你的项目ID.supabase.co
+DB_PORT=5432
+DB_NAME=postgres
+DB_USER=postgres
+DB_PASSWORD=你的数据库密码
+```
+
+> 未配置数据库时，项目记忆功能自动禁用（侧边栏提示），聊天与知识库不受影响。
+> 首次使用需在 Supabase SQL Editor 执行 `sql/init_project_memory.sql` 创建 5 张表。
 
 ### 4. 启动应用
 
@@ -206,6 +311,9 @@ EMBEDDING_MODEL = "text-embedding-v3"
 # 可选（Rerank 精排，智谱）
 RERANK_API_KEY = "你的智谱密钥"
 RERANK_MODEL = "rerank"
+
+# 可选（Project Memory，Supabase）
+DATABASE_URL = "postgresql://postgres.项目ID:密码@aws-0-区域.pooler.supabase.com:6543/postgres"
 ```
 
 ### 4. 等待部署完成
@@ -221,17 +329,29 @@ RERANK_MODEL = "rerank"
 - **方案推演**：描述业务场景，生成技术方案对比
 - **PPT 产出**：让助手生成汇报材料，支持在线修改
 - **文档编辑**：上传现有 DOCX/PPT，增量修改不破坏原文件
+- **项目状态追踪**：上传周报/会议纪要，抽取决策/任务/风险/事件入库，随时查看项目快照
 
 ### 政务/安全项目
 - **国密合规**：依据知识库资料核对 SM2/SM4 等合规性
 - **等保对标**：按等保要求生成差距分析报告
 - **统一认证**：方案起草、接口设计、风险预判
 
+### Project Memory 快速上手
+
+1. 侧边栏「🗂️ 项目记忆（Supabase）」→「➕ 新建项目」创建项目
+2. 在「知识库」上传会议纪要/周报（照常入库 RAG）
+3. 回到「项目记忆」选择该文档 → 点「🔍 提取项目状态」
+4. 主页面检查抽取结果 → 点「✅ 确认写入项目记忆」
+5. 主页面「📋 项目状态」区随时查看项目快照
+
 ---
 
 ## ⚠️ 已知限制
 
 - **知识库持久化**：公网 Demo 的知识库存储在 Streamlit 服务器内存中，重启后会清空
+- **Project Memory 无自动合并**：当前版本不做新旧事实自动合并、冲突检测和历史状态覆盖，所有新抽取事实需**人工确认后入库**；同一文档重复提取会产生重复记录
+- **Project Memory 单项目**：第一版只支持创建和选择一个项目，不做复杂项目管理（多项目切换、成员、权限）
+- **事实抽取依赖模型质量**：LLM 抽取的决策/任务/风险/事件可能存在遗漏或误判，故设计为人工确认后入库
 - **PPT 编辑边界**：hands-on-deck 暂不支持 SmartArt 图形修改，含 SmartArt 的 PPT 会给出警告
 - **PPT 动画**：编辑含动画的 PPT 时，动画可能丢失或异常
 - **DOCX 修订**：编辑含 Word 修订标记的 DOCX 时，修订历史可能被破坏
@@ -254,6 +374,8 @@ RERANK_MODEL = "rerank"
 | Excel | openpyxl | Excel 文本提取 |
 | 向量存储 | JSON + base64 | 本地持久化 |
 | BM25 | 自实现 | 关键词检索 |
+| 项目数据库 | Supabase PostgreSQL | Project Memory 持久化 |
+| ORM | SQLAlchemy 2.x + psycopg3 | 数据库访问层 |
 
 ---
 
