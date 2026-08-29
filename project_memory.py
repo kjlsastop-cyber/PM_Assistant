@@ -58,7 +58,23 @@ RISK_STATUS_CLOSED = "closed"
 
 
 def _env(name: str, default: str = "") -> str:
-    return os.getenv(name, default).strip()
+    """读取配置优先级：os.environ → st.secrets → default。
+
+    本地开发靠 .env（被 load_dotenv 注入 os.environ）；
+    Streamlit Cloud Secrets 同时注入 os.environ 和 st.secrets，双保险。
+    """
+    v = os.environ.get(name, "").strip()
+    if v:
+        return v
+    # 兜底：尝试 st.secrets（某些云环境可能只在 st.secrets 暴露）
+    try:
+        import streamlit as st  # noqa: F811
+        v = (st.secrets.get(name) or "").strip()
+        if v:
+            return v
+    except Exception:
+        pass
+    return default.strip()
 
 
 def _build_database_url() -> Optional[str]:
