@@ -7,7 +7,7 @@
 ### 1.1 运行环境
 - 运行方式：本地 Streamlit 服务 + 真实浏览器端到端验证
 - 操作系统：Linux 沙箱环境
-- 依赖版本：Python 3.9+，Streamlit 1.62，SQLAlchemy 2.0.52
+- 依赖版本：Python 3.9+，Streamlit >=1.35，SQLAlchemy 2.0.52
 
 ### 1.2 模型配置
 | 模块 | 模型 | 服务商 |
@@ -18,7 +18,7 @@
 | 自审模型 | qwen3.8-max | 阿里云通义千问 |
 
 ### 1.3 RAG 链路配置
-- 分块策略：结构感知分块，chunk_size=800，chunk_overlap=100
+- 分块策略：结构感知分块，chunk_size=700，chunk_overlap=100
 - 检索链路：向量语义检索 + BM25 关键词检索 → RRF 融合 → Rerank 精排
 - 候选数量：Rerank 输入 20 条，最终输出 Top-K=5
 - 知识库预置文档：《产品需求文档.md》
