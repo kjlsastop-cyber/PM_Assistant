@@ -1,0 +1,19 @@
+{
+  "as_of":"2026-08-28",
+  "project":{"name":"星河统一认证升级项目","status":"active","manager":"李敏"},
+  "tasks":[
+    {"title":"员工门户SSO联调","owner":"陈晨","status":"done","due_date":"2026-08-20","source":"周报-2026-08-21.md"},
+    {"title":"补齐供应商接口字段映射","owner":"张伟","status":"done","due_date":"2026-09-05","completed_at":"2026-08-27","source":"周报-2026-08-28.md"},
+    {"title":"研发部门第一批试点","owner":"赵强","status":"todo","due_date":"2026-09-10","source":"周报-2026-08-28.md"},
+    {"title":"移动办公改造","owner":"刘洋","status":"in_progress","source":"周报-2026-08-28.md"}
+  ],
+  "decisions":[
+    {"content":"第一批试点由销售部门调整为研发部门","decision_date":"2026-08-21","source":"周报-2026-08-21.md"},
+    {"content":"移动办公改造计划批准","decision_date":"2026-08-28","source":"周报-2026-08-28.md"}
+  ],
+  "risks":[
+    {"content":"供应商门户接口文档未交付","status":"closed","closed_at":"2026-08-26","source":"周报-2026-08-28.md"},
+    {"content":"短信供应商峰值容量不足","status":"open","severity":"high","owner":"王芳","source":"周报-2026-08-28.md"}
+  ],
+  "events":[{"content":"供应商门户接口文档交付","event_date":"2026-08-26","source":"周报-2026-08-28.md"}]
+}

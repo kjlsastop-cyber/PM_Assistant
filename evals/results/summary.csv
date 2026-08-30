@@ -1,0 +1,5 @@
+﻿arm,n,avg_score,accuracy,avg_latency_s,avg_total_tokens,revision_rate
+rag,2,5.0,1.0,9.93,1139.5,0.0
+rag_reviewer,2,5.0,1.0,15.77,2022.5,0.0
+rag_pm,2,5.0,1.0,8.04,1499,0.0
+rag_pm_reviewer,2,5.0,1.0,15.54,2706,0.0
