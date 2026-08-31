@@ -19,7 +19,7 @@
 
 ## 🌟 技术亮点
 
-🔀 **混合检索**：Embedding 向量 + BM25 关键词 → RRF 融合 → Rerank 重排，三层漏斗保障召回质量
+🔀 **混合检索**：Embedding 向量 + BM25 关键词 → RRF 融合 → Rerank 重排，四层漏斗保障召回质量
 🧠 **Project Memory**：LLM 从会议纪要/周报抽取结构化事实（决策/任务/风险/事件），人工确认后写入 Supabase PostgreSQL，项目状态跨会话持久化
 🛡️ **Agent 自审**：与当前对话模型错开的 Reviewer 做五维度质量审查（准确性/完整性/来源/合规/逻辑），DeepSeek↔通义千问互审，人机协同闭环
 📝 **自然语言编辑文档**：LLM 生成 patch → 增量应用，永远输出副本不覆盖源文件，带 SmartArt/修订标记边界检测
